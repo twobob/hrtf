@@ -113,6 +113,9 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
             Steinberg::int32 numPoints = queue->getPointCount ();
             if (numPoints > 0 && queue->getPoint (numPoints - 1, sampleOffset, val) == Steinberg::kResultTrue)
             {
+                /* A non-finite parameter value must never be cached or saved. */
+                if (!std::isfinite (val)) continue;
+
                 if (queue->getParameterId () == kParamDistance)
                 {
                     mDistanceNorm = val;
@@ -191,13 +194,18 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
+    if (version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
     if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
 
-    mDistanceNorm = dNorm;
-    mRotationNorm = rNorm;
+    /* Out-of-range or non-finite values are ignored rather than pushed into
+       the core, where they would poison the DSP state for the session. */
+    if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
+        mDistanceNorm = dNorm;
+    if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
+        mRotationNorm = rNorm;
 
     if (mCore)
     {
@@ -214,7 +222,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     if (!state) return Steinberg::kResultFalse;
     Steinberg::IBStreamer streamer (state);
 
-    streamer.writeInt32 (1);
+    streamer.writeInt32 (kStateVersion);
     streamer.writeDouble (mDistanceNorm);
     streamer.writeDouble (mRotationNorm);
 

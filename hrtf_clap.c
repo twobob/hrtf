@@ -259,6 +259,8 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
     errno = 0;
     double v = strtod(text, &end);
     if (end == text || errno == ERANGE) return false;
+    /* "nan" and "inf" parse successfully but must never reach a parameter. */
+    if (!isfinite(v)) return false;
 
     while (*end == ' ' || *end == '\t') ++end;
 
@@ -293,6 +295,10 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
 
 static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
 {
+    /* Never store a non-finite parameter: it would be reported back to the
+       host through get_value and written into any saved state. */
+    if (!isfinite(value)) return;
+
     if (id == PARAM_DISTANCE) {
         if (value < 0.05) value = 0.05;
         if (value > 20.0) value = 20.0;

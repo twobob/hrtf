@@ -221,12 +221,16 @@ void hrtf_reset(HrtfCore *h)
 
 void hrtf_set_distance(HrtfCore *h, double distance_m)
 {
-    if (h) h->distance_m = clampd(distance_m, 0.05, 20.0);
+    /* A non-finite value (hostile automation, corrupt preset) would spread
+       through the smoothers and silence the output permanently. */
+    if (!h || !isfinite(distance_m)) return;
+    h->distance_m = clampd(distance_m, 0.05, 20.0);
 }
 
 void hrtf_set_rotation_phase(HrtfCore *h, double phase)
 {
-    if (h) h->phase = wrap01(phase);
+    if (!h || !isfinite(phase)) return;
+    h->phase = wrap01(phase);
 }
 
 static inline float soft_limit(float x)
@@ -243,6 +247,11 @@ static inline float soft_limit(float x)
 void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 {
     if (!h || !mono || !stereo || !stereo[0] || !stereo[1]) return;
+
+    /* Belt and braces: once a non-finite value reaches the filter state the
+       output never recovers, so re-seed the smoothers if that ever happens. */
+    if (!isfinite(h->phase_smooth)) h->phase_smooth = 0.0;
+    if (!isfinite(h->distance_smooth)) h->distance_smooth = 2.0;
 
     const double param_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms */
     const double distance_slew = exp(-1.0 / (0.050 * h->fs)); /* 50 ms */

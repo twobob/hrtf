@@ -1,8 +1,27 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <math.h>
 #include <windows.h>
 #include <clap/clap.h>
+
+/* Minimal input-event list carrying a single event. */
+typedef struct {
+    const clap_event_header_t *event;
+} SingleEvent;
+
+static uint32_t single_events_size(const clap_input_events_t *list)
+{
+    const SingleEvent *s = (const SingleEvent *)list->ctx;
+    return s->event ? 1u : 0u;
+}
+
+static const clap_event_header_t *single_events_get(const clap_input_events_t *list,
+                                                    uint32_t index)
+{
+    const SingleEvent *s = (const SingleEvent *)list->ctx;
+    return index == 0u ? s->event : NULL;
+}
 
 int main(void) {
     /* Fail the build without popping up a crash dialog if this harness
@@ -137,6 +156,47 @@ int main(void) {
         printf("SUCCESS: Plugin generated valid binaural audio!\n");
     } else {
         printf("ERROR: Audio output was unexpectedly silent or zero!\n");
+        ++failures;
+    }
+
+    /* Hostile parameter input must not poison the DSP state: a NaN reaching
+       the phase smoother silences the output for the rest of the session. */
+    const clap_plugin_params_t *params =
+        (const clap_plugin_params_t *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
+    if (params && params->flush && params->get_value) {
+        clap_event_param_value_t nan_event;
+        memset(&nan_event, 0, sizeof(nan_event));
+        nan_event.header.size = sizeof(nan_event);
+        nan_event.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+        nan_event.header.type = CLAP_EVENT_PARAM_VALUE;
+        nan_event.header.time = 0;
+        nan_event.param_id = 2; /* PARAM_ROTATION in hrtf_clap.c */
+        nan_event.value = (double)NAN;
+
+        SingleEvent se = { &nan_event.header };
+        clap_input_events_t in_list = { &se, single_events_size, single_events_get };
+        params->flush(plugin, &in_list, NULL);
+
+        double v = 0.0;
+        if (params->get_value(plugin, 2, &v) && !isfinite(v)) {
+            printf("ERROR: a NaN parameter value was accepted\n");
+            ++failures;
+        }
+
+        for (uint32_t i = 0; i < N; ++i) {
+            out_l[i] = 0.0f;
+            out_r[i] = 0.0f;
+        }
+        plugin->process(plugin, &process);
+        for (uint32_t i = 0; i < N; ++i) {
+            if (!isfinite(out_l[i]) || !isfinite(out_r[i])) {
+                printf("ERROR: output is not finite after a NaN parameter value\n");
+                ++failures;
+                break;
+            }
+        }
+    } else {
+        printf("ERROR: the params extension is missing\n");
         ++failures;
     }
 

@@ -2,6 +2,7 @@
 #include "plugids.h"
 #include "base/source/fstreamer.h"
 #include "public.sdk/source/vst/vstparameters.h"
+#include <cmath>
 
 namespace RotatingHrtf {
 
@@ -35,13 +36,16 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
+    if (version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
     if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
 
-    setParamNormalized (kParamDistance, dNorm);
-    setParamNormalized (kParamRotation, rNorm);
+    if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
+        setParamNormalized (kParamDistance, dNorm);
+    if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
+        setParamNormalized (kParamRotation, rNorm);
 
     return Steinberg::kResultOk;
 }
