@@ -1,6 +1,6 @@
 # Rotating HRTF v2 Audio Plugin (CLAP + VST3 for Ableton Live)
 
-A 3D binaural spatializer plugin built around an acoustically verified HRTF DSP core. It simulates head-related transfer functions including Interaural Time Differences (ITD), spherical head-shadow attenuation (ILD), distance attenuation, and pinna spectral cues (biquad peaking and shelf filters).
+A 3D binaural spatialiser plugin built around an acoustically verified HRTF DSP core. It simulates head-related transfer functions including Interaural Time Differences (ITD), spherical head-shadow attenuation (ILD), distance attenuation, and pinna spectral cues (biquad peaking and shelf filters).
 
 ---
 
@@ -10,7 +10,7 @@ A 3D binaural spatializer plugin built around an acoustically verified HRTF DSP 
    - **Plugin Name:** `Rotating HRTF v2`
    - **Fully compatible with Ableton Live (Live 10, 11, 12)** and all VST3 DAWs.
    - Deployed directly to `C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3`.
-   - Accepts both **Mono and Stereo tracks** (automatically downmixes stereo input to mono for spatialization), and outputs full 2-channel binaural stereo.
+   - Accepts both **Mono and Stereo tracks** (automatically downmixes stereo input to mono for spatialisation), and outputs full 2-channel binaural stereo.
    - Full parameter automation support for **Distance** and **Rotation**.
    - Preset and project state save/recall (`getState` / `setState`).
 
@@ -47,10 +47,12 @@ copy RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vs
 
 | Parameter | Range | Default | Unit | Description |
 |---|---|---|---|---|
-| **Distance** | 0.05 – 20.0 | 2.0 | meters (`m`) | Simulates source distance with inverse-distance law attenuation and near-field spectral compensation. |
+| **Distance** | 0.05 – 20.0 | 2.0 | metres (`m`) | Simulates source distance with inverse-distance law attenuation, near-field low-frequency ILD divergence, and proximity cue. |
 | **Rotation** | 0.0 – 360.0 | 0.0 | degrees (`deg`) | Horizontal azimuth angle. `0°` = Front, `90°` = Right ear, `180°` = Rear, `270°` = Left ear. |
+| **Elevation** | -90.0 – +90.0 | 0.0 | degrees (`deg`) | Vertical angle. `-90°` = Below, `0°` = Horizontal plane, `+90°` = Directly overhead. Dynamically modulates pinna concha notches. |
+| **Space** | 0.0 – 100.0 | 15.0 | percent (`%`) | Room boundary early reflection externalisation engine. Pulls audio outside the skull into a natural acoustic room. |
 
-Both parameters feature smooth exponential slewing (20 ms for rotation, 50 ms for distance) inside [hrtf_core.c](file:///g:/dev/hrtf/hrtf_core.c) to prevent clicking or zipper noise during automation.
+All parameters feature smooth exponential slewing (20–50 ms) inside [hrtf_core.c](file:///g:/dev/hrtf/hrtf_core.c) to prevent clicking or zipper noise during automation.
 
 ---
 
@@ -79,7 +81,7 @@ build_all.bat
 This compiles:
 - `RotatingHRTF_v2.clap`
 - `RotatingHRTF_v2.vst3` (and populates `bundle\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3`)
-- Runs `test_clap.exe` (CLAP loading, initialization, processing, output audio energy)
+- Runs `test_clap.exe` (CLAP loading, initialisation, processing, output audio energy)
 - Runs `test_vst3.exe` (VST3 loading, COM factory, parameter enumeration, audio processing, rotation automation)
 
 Both test hosts exit non-zero when a check fails, and `build_all.bat` stops with an error in that case, so a "completed successfully" banner means the checks really passed. The script also tries to deploy the bundle to the system VST3 folder; that step needs Administrator rights and it reports plainly when it could not write there.
@@ -92,7 +94,7 @@ Both test hosts exit non-zero when a check fails, and `build_all.bat` stops with
 - [hrtf_clap.c](file:///g:/dev/hrtf/hrtf_clap.c): CLAP plugin implementation.
 - [vst3/](file:///g:/dev/hrtf/vst3): Native VST3 plugin implementation:
   - [vst3/plugprocessor.h](file:///g:/dev/hrtf/vst3/plugprocessor.h) / [vst3/plugprocessor.cpp](file:///g:/dev/hrtf/vst3/plugprocessor.cpp): Audio effect processor with stereo downmixing, HRTF processing, and automation.
-  - [vst3/plugcontroller.h](file:///g:/dev/hrtf/vst3/plugcontroller.h) / [vst3/plugcontroller.cpp](file:///g:/dev/hrtf/vst3/plugcontroller.cpp): Parameter controller (Distance, Rotation) and state serialization.
+  - [vst3/plugcontroller.h](file:///g:/dev/hrtf/vst3/plugcontroller.h) / [vst3/plugcontroller.cpp](file:///g:/dev/hrtf/vst3/plugcontroller.cpp): Parameter controller (Distance, Rotation) and state serialisation.
   - [vst3/plugfactory.cpp](file:///g:/dev/hrtf/vst3/plugfactory.cpp): Steinberg VST3 class factory exports.
   - [vst3/plugids.h](file:///g:/dev/hrtf/vst3/plugids.h): Unique GUIDs for processor and controller.
   - [vst3/version.h](file:///g:/dev/hrtf/vst3/version.h): Plugin version metadata.

@@ -17,7 +17,7 @@
 #define FULL_VERSION_STR "2.0.0.1"
 
 #define stringOriginalFilename "RotatingHRTF_v2.vst3"
-#define stringFileDescription "Rotating HRTF Binaural Spatializer v2"
+#define stringFileDescription "Rotating HRTF Binaural Spatialiser v2"
 #define stringCompanyName "Example Audio"
 #define stringCompanyWeb ""
 #define stringCompanyEmail ""

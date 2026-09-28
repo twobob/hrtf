@@ -166,7 +166,7 @@ int main()
         return 1;
     }
 
-    // Initialize processor
+    // Initialise processor
     Steinberg::Vst::IComponent* comp = nullptr;
     if (processor->queryInterface(Steinberg::Vst::IComponent::iid, (void**)&comp) == Steinberg::kResultTrue && comp)
     {
@@ -243,7 +243,7 @@ int main()
     processData.outputParameterChanges = nullptr;
 
     res = processor->process(processData);
-    std::cout << "Process result (center): " << (res == Steinberg::kResultOk ? "OK" : "FAILED") << "\n";
+    std::cout << "Process result (centre): " << (res == Steinberg::kResultOk ? "OK" : "FAILED") << "\n";
     if (res != Steinberg::kResultOk)
     {
         std::cerr << "ERROR: process() did not return kResultOk!\n";
@@ -256,7 +256,7 @@ int main()
         sum_l += std::abs(out_l[i]);
         sum_r += std::abs(out_r[i]);
     }
-    std::cout << "Center Energy: Left = " << sum_l << ", Right = " << sum_r << "\n";
+    std::cout << "Centre Energy: Left = " << sum_l << ", Right = " << sum_r << "\n";
 
     // Now test Parameter Changes: Rotate to 90 degrees Right (phase = 0.25)
     DummyChanges paramChanges;
@@ -448,6 +448,52 @@ int main()
             else
             {
                 std::cout << "SUCCESS: oversized blocks render correctly without reallocating.\n";
+            }
+        }
+        releaseProcessor (p);
+    }
+
+    // 3D Elevation: overhead (+90 deg) must produce symmetric ear energy
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor)
+        {
+            DummyChanges elevChanges;
+            elevChanges.q.id = RotatingHrtf::kParamElevation;
+            elevChanges.q.val = 1.0; // normalized 1.0 = +90 deg
+
+            const int NE = 256;
+            float el_l[NE] = {0}, el_r[NE] = {0}, el_in[NE];
+            for (int i = 0; i < NE; ++i) el_in[i] = sinf (2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
+            float* inPtrs[2] = { el_in, el_in };
+            float* outPtrs[2] = { el_l, el_r };
+            Steinberg::Vst::AudioBusBuffers inBus = {};
+            inBus.numChannels = 2; inBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers outBus = {};
+            outBus.numChannels = 2; outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::ProcessData data = {};
+            data.processMode = Steinberg::Vst::kRealtime;
+            data.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data.numSamples = NE;
+            data.numInputs = 1; data.inputs = &inBus;
+            data.numOutputs = 1; data.outputs = &outBus;
+            data.inputParameterChanges = &elevChanges;
+
+            p.processor->process (data);
+            data.inputParameterChanges = nullptr;
+            for (int b = 0; b < 6; ++b) p.processor->process (data);
+
+            double overhead_l = 0.0, overhead_r = 0.0;
+            for (int i = 0; i < NE; ++i) {
+                overhead_l += std::abs (el_l[i]);
+                overhead_r += std::abs (el_r[i]);
+            }
+
+            if (std::abs (overhead_l - overhead_r) < 1.0 && overhead_l > 0.1) {
+                std::cout << "SUCCESS: 3D overhead elevation (+90 deg) produces symmetric ear energy.\n";
+            } else {
+                std::cerr << "ERROR: overhead elevation did not produce symmetric energy (L=" << overhead_l << ", R=" << overhead_r << ")\n";
+                ++failures;
             }
         }
         releaseProcessor (p);

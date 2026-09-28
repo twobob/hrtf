@@ -84,6 +84,8 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
             double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
             hrtf_set_distance (mCore, dist_m);
             hrtf_set_rotation_phase (mCore, mRotationNorm);
+            hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
+            hrtf_set_space (mCore, mSpaceNorm);
             hrtf_reset (mCore);
         }
     }
@@ -141,6 +143,18 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
         mRotationNorm = value;
         if (mCore)
             hrtf_set_rotation_phase (mCore, value);
+    }
+    else if (id == kParamElevation)
+    {
+        mElevationNorm = value;
+        if (mCore)
+            hrtf_set_elevation_deg (mCore, -90.0 + value * 180.0);
+    }
+    else if (id == kParamSpace)
+    {
+        mSpaceNorm = value;
+        if (mCore)
+            hrtf_set_space (mCore, value);
     }
 }
 
@@ -267,7 +281,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != 1 && version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
@@ -280,11 +294,25 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
     if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
         mRotationNorm = rNorm;
 
+    if (version >= 2)
+    {
+        double eNorm = 0.5, sNorm = 0.15;
+        if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
+        if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
+
+        if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
+            mElevationNorm = eNorm;
+        if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
+            mSpaceNorm = sNorm;
+    }
+
     if (mCore)
     {
         double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
         hrtf_set_distance (mCore, dist_m);
         hrtf_set_rotation_phase (mCore, mRotationNorm);
+        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
+        hrtf_set_space (mCore, mSpaceNorm);
     }
 
     return Steinberg::kResultOk;
@@ -298,6 +326,8 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     streamer.writeInt32 (kStateVersion);
     streamer.writeDouble (mDistanceNorm);
     streamer.writeDouble (mRotationNorm);
+    streamer.writeDouble (mElevationNorm);
+    streamer.writeDouble (mSpaceNorm);
 
     return Steinberg::kResultOk;
 }

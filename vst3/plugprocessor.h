@@ -38,6 +38,8 @@ private:
     double mSampleRate = 48000.0;
     Steinberg::Vst::ParamValue mDistanceNorm = 0.09774436; // (2.0 - 0.05) / 19.95 = ~0.097744
     Steinberg::Vst::ParamValue mRotationNorm = 0.0;
+    Steinberg::Vst::ParamValue mElevationNorm = 0.5; // (0.0 - (-90.0)) / 180.0 = 0.5 (0 deg)
+    Steinberg::Vst::ParamValue mSpaceNorm = 0.15;     // 15% room externalisation
     std::vector<float> mMonoBuffer;
 };
 

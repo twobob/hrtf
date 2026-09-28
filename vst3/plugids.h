@@ -8,11 +8,13 @@ namespace RotatingHrtf {
 enum ParamIDs : Steinberg::Vst::ParamID
 {
     kParamDistance = 100,
-    kParamRotation = 101
+    kParamRotation = 101,
+    kParamElevation = 102,
+    kParamSpace = 103
 };
 
 // Component-state layout written by getState() and read by setState().
-constexpr Steinberg::int32 kStateVersion = 1;
+constexpr Steinberg::int32 kStateVersion = 2;
 
 // Unique Class IDs for Processor and Controller (v2)
 // {3480B66E-0C1B-4E38-B7D4-9988C7E72B20}

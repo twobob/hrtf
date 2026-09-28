@@ -299,6 +299,8 @@ int main(void) {
 
             flush_param(plugin, params, 2, 0.75);   /* rotation phase */
             flush_param(plugin, params, 1, 8.0);    /* distance, metres */
+            flush_param(plugin, params, 3, 30.0);   /* elevation, degrees */
+            flush_param(plugin, params, 4, 0.40);   /* space, 0..1 */
 
             if (!state->save(plugin, &os)) {
                 printf("ERROR: state save failed\n");
@@ -307,6 +309,8 @@ int main(void) {
 
             flush_param(plugin, params, 2, 0.25);
             flush_param(plugin, params, 1, 1.0);
+            flush_param(plugin, params, 3, 0.0);
+            flush_param(plugin, params, 4, 0.0);
 
             mem.pos = 0;
             if (!state->load(plugin, &is)) {
@@ -314,15 +318,25 @@ int main(void) {
                 ++failures;
             }
 
-            double d = 0.0, r = 0.0;
+            double d = 0.0, r = 0.0, e = 0.0, s = 0.0;
             params->get_value(plugin, 1, &d);
             params->get_value(plugin, 2, &r);
+            params->get_value(plugin, 3, &e);
+            params->get_value(plugin, 4, &s);
             if (fabs(d - 8.0) > 1e-9) {
                 printf("ERROR: distance was not restored (got %f)\n", d);
                 ++failures;
             }
             if (fabs(r - 0.75) > 1e-9) {
                 printf("ERROR: rotation was not restored (got %f)\n", r);
+                ++failures;
+            }
+            if (fabs(e - 30.0) > 1e-9) {
+                printf("ERROR: elevation was not restored (got %f)\n", e);
+                ++failures;
+            }
+            if (fabs(s - 0.40) > 1e-9) {
+                printf("ERROR: space was not restored (got %f)\n", s);
                 ++failures;
             }
         }

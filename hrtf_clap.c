@@ -21,7 +21,9 @@
 
 enum {
     PARAM_DISTANCE = 1,
-    PARAM_ROTATION = 2
+    PARAM_ROTATION = 2,
+    PARAM_ELEVATION = 3,
+    PARAM_SPACE = 4
 };
 
 typedef struct {
@@ -31,6 +33,8 @@ typedef struct {
     double sample_rate;
     double distance_m;
     double rotation_phase;
+    double elevation_deg;
+    double space;
     bool active;
     float *silence;            /* zeros, used when the input port is inactive */
     size_t silence_frames;
@@ -75,6 +79,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     p->sample_rate = 48000.0;
     p->distance_m = 2.0;
     p->rotation_phase = 0.0;
+    p->elevation_deg = 0.0;
+    p->space = 0.15;
     p->active = false;
     return true;
 }
@@ -116,6 +122,8 @@ static bool plugin_activate(const clap_plugin_t *plugin,
 
     hrtf_set_distance(p->core, p->distance_m);
     hrtf_set_rotation_phase(p->core, p->rotation_phase);
+    hrtf_set_elevation_deg(p->core, p->elevation_deg);
+    hrtf_set_space(p->core, p->space);
     hrtf_reset(p->core);
     p->active = true;
     return true;
@@ -151,6 +159,8 @@ static void plugin_reset(const clap_plugin_t *plugin)
     if (!p->core) return;
     hrtf_set_distance(p->core, p->distance_m);
     hrtf_set_rotation_phase(p->core, p->rotation_phase);
+    hrtf_set_elevation_deg(p->core, p->elevation_deg);
+    hrtf_set_space(p->core, p->space);
     hrtf_reset(p->core);
 }
 
@@ -195,7 +205,7 @@ static const clap_plugin_audio_ports_t audio_ports_ext = {
 static uint32_t params_count(const clap_plugin_t *plugin)
 {
     (void)plugin;
-    return 2u;
+    return 4u;
 }
 
 static bool params_get_info(const clap_plugin_t *plugin,
@@ -203,7 +213,7 @@ static bool params_get_info(const clap_plugin_t *plugin,
                             clap_param_info_t *info)
 {
     (void)plugin;
-    if (!info || index >= 2u) return false;
+    if (!info || index >= 4u) return false;
 
     memset(info, 0, sizeof(*info));
 
@@ -215,7 +225,7 @@ static bool params_get_info(const clap_plugin_t *plugin,
         info->min_value = 0.05;
         info->max_value = 20.0;
         info->default_value = 2.0;
-    } else {
+    } else if (index == 1u) {
         info->id = PARAM_ROTATION;
         info->flags = CLAP_PARAM_IS_AUTOMATABLE |
                       CLAP_PARAM_IS_PERIODIC |
@@ -225,6 +235,22 @@ static bool params_get_info(const clap_plugin_t *plugin,
         info->min_value = 0.0;
         info->max_value = 1.0;
         info->default_value = 0.0;
+    } else if (index == 2u) {
+        info->id = PARAM_ELEVATION;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Elevation");
+        snprintf(info->module, sizeof(info->module), "Position");
+        info->min_value = -90.0;
+        info->max_value = 90.0;
+        info->default_value = 0.0;
+    } else if (index == 3u) {
+        info->id = PARAM_SPACE;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Space");
+        snprintf(info->module, sizeof(info->module), "Room");
+        info->min_value = 0.0;
+        info->max_value = 1.0;
+        info->default_value = 0.15;
     }
     return true;
 }
@@ -242,6 +268,14 @@ static bool params_get_value(const clap_plugin_t *plugin,
     }
     if (param_id == PARAM_ROTATION) {
         *out_value = p->rotation_phase;
+        return true;
+    }
+    if (param_id == PARAM_ELEVATION) {
+        *out_value = p->elevation_deg;
+        return true;
+    }
+    if (param_id == PARAM_SPACE) {
+        *out_value = p->space;
         return true;
     }
     return false;
@@ -264,6 +298,14 @@ static bool params_value_to_text(const clap_plugin_t *plugin,
         double degrees = value * 360.0;
         if (degrees >= 359.9995) degrees = 0.0;
         snprintf(out_buffer, out_buffer_capacity, "%.1f deg", degrees);
+        return true;
+    }
+    if (param_id == PARAM_ELEVATION) {
+        snprintf(out_buffer, out_buffer_capacity, "%.1f deg", value);
+        return true;
+    }
+    if (param_id == PARAM_SPACE) {
+        snprintf(out_buffer, out_buffer_capacity, "%.0f %%", value * 100.0);
         return true;
     }
     return false;
@@ -312,6 +354,27 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
         return true;
     }
 
+    if (param_id == PARAM_ELEVATION) {
+        if (*end == 'd' || *end == 'D') {
+            if (end[1] == 'e' || end[1] == 'E') {
+                if (end[2] == 'g' || end[2] == 'G') end += 3;
+            }
+        }
+        if (*end != '\0') return false;
+        if (v < -90.0 || v > 90.0) return false;
+        *out_value = v;
+        return true;
+    }
+
+    if (param_id == PARAM_SPACE) {
+        if (*end == '%') ++end;
+        if (*end != '\0') return false;
+        if (v > 1.0) v /= 100.0;
+        if (v < 0.0 || v > 1.0) return false;
+        *out_value = v;
+        return true;
+    }
+
     return false;
 }
 
@@ -331,6 +394,16 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
         if (value < 0.0) value += 1.0;
         p->rotation_phase = value;
         if (p->core) hrtf_set_rotation_phase(p->core, value);
+    } else if (id == PARAM_ELEVATION) {
+        if (value < -90.0) value = -90.0;
+        if (value > 90.0) value = 90.0;
+        p->elevation_deg = value;
+        if (p->core) hrtf_set_elevation_deg(p->core, value);
+    } else if (id == PARAM_SPACE) {
+        if (value < 0.0) value = 0.0;
+        if (value > 1.0) value = 1.0;
+        p->space = value;
+        if (p->core) hrtf_set_space(p->core, value);
     }
 }
 
@@ -367,16 +440,18 @@ static const clap_plugin_params_t params_ext = {
 /* ------------------------------ state ------------------------------ */
 
 static const char kStateMagic[4] = { 'H', 'R', 'T', 'F' };
-static const uint32_t kStateVersion = 1;
+static const uint32_t kStateVersion = 2;
 
 static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!stream || !stream->write) return false;
 
-    double values[2];
+    double values[4];
     values[0] = p->distance_m;
     values[1] = p->rotation_phase;
+    values[2] = p->elevation_deg;
+    values[3] = p->space;
 
     if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
         return false;
@@ -395,24 +470,50 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
 
     char magic[4];
     uint32_t version = 0;
-    double values[2] = { 0.0, 0.0 };
 
     if (stream->read(stream, magic, sizeof(magic)) != (int64_t)sizeof(magic)) return false;
     if (memcmp(magic, kStateMagic, sizeof(magic)) != 0) return false;
     if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
-    if (version != kStateVersion) return false;
-    if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+    if (version != 1 && version != kStateVersion) return false;
 
-    /* State files travel between machines and versions, so validate before
-       adopting anything from the stream. */
-    if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-        p->distance_m = values[0];
-        if (p->core) hrtf_set_distance(p->core, values[0]);
-    }
-    if (isfinite(values[1])) {
-        double phase = wrap_unit(values[1]);
-        p->rotation_phase = phase;
-        if (p->core) hrtf_set_rotation_phase(p->core, phase);
+    if (version == 1) {
+        double values[2] = { 0.0, 0.0 };
+        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+            p->distance_m = values[0];
+            if (p->core) hrtf_set_distance(p->core, values[0]);
+        }
+        if (isfinite(values[1])) {
+            double phase = wrap_unit(values[1]);
+            p->rotation_phase = phase;
+            if (p->core) hrtf_set_rotation_phase(p->core, phase);
+        }
+        p->elevation_deg = 0.0;
+        p->space = 0.15;
+        if (p->core) {
+            hrtf_set_elevation_deg(p->core, 0.0);
+            hrtf_set_space(p->core, 0.15);
+        }
+    } else if (version == 2) {
+        double values[4] = { 0.0, 0.0, 0.0, 0.0 };
+        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+            p->distance_m = values[0];
+            if (p->core) hrtf_set_distance(p->core, values[0]);
+        }
+        if (isfinite(values[1])) {
+            double phase = wrap_unit(values[1]);
+            p->rotation_phase = phase;
+            if (p->core) hrtf_set_rotation_phase(p->core, phase);
+        }
+        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
+            p->elevation_deg = values[2];
+            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
+        }
+        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
+            p->space = values[3];
+            if (p->core) hrtf_set_space(p->core, values[3]);
+        }
     }
 
     return true;
@@ -563,6 +664,8 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *factory,
     p->host = host;
     p->distance_m = 2.0;
     p->rotation_phase = 0.0;
+    p->elevation_deg = 0.0;
+    p->space = 0.15;
 
     p->plugin.desc = &descriptor;
     p->plugin.plugin_data = p;
