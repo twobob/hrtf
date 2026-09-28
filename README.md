@@ -171,7 +171,7 @@ All parameters feature continuous exponential slewing ($20\text{ ms}$ to $50\tex
 ## Ableton Live Integration Guide
 
 ### Automated 1-Click Install
-Run [install_ableton.bat](file:///g:/dev/hrtf/install_ableton.bat). It self-elevates with Administrator permissions if necessary and deploys the binary into the standard Windows 64-bit VST3 bundle location:
+Run [`install_ableton.bat`](install_ableton.bat). It self-elevates with Administrator permissions if necessary and deploys the binary into the standard Windows 64-bit VST3 bundle location:
 ```cmd
 install_ableton.bat
 ```
@@ -246,18 +246,21 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 - **Factory & Controller**: Validates COM class creation, parameter registration ($7$ parameters), and normalisation curves.
 - **Binaural Energy & ILD**: Verifies that lateral panning ($90^\circ$) produces over $1.5\times$ more energy in the ipsilateral ear than the contralateral ear.
 - **Sample-Accurate Automation**: Verifies that parameter change events are applied at their exact sample offsets within the block.
-- **Oversize Block Handling**: Confirms that blocks larger than `maxSamplesPerBlock` ($1024+$ samples) process correctly without heap allocations.
-- **3D Elevation Symmetry**: Verifies that overhead elevation ($+90^\circ$) yields symmetric left/right energy.
-- **Test Pulse Generation**: Confirms that enabling `Test Pulse` on a silent input stream generates audio ($E > 33.0$).
-- **Test Tone Differentiation**: Confirms significant spectral variance ($\Delta = 36.71$) between low rumble and crisp transient settings.
-- **Ear Scale Response**: Verifies that varying `Ear Scale` from $70\%$ to $130\%$ produces substantial ITD delay and pinna notch shifts ($\Delta = 84.89$).
+- **Oversize Block Handling**: Confirms that blocks larger than `maxSamplesPerBlock` ($1024+$ samples) process correctly and produce valid audio.
+- **3D Elevation Symmetry**: Verifies that overhead elevation ($+90^\circ$) yields symmetric left/right energy ($|L - R| < 1.0, L > 0.1$).
+- **Test Pulse Generation & Silence**: Confirms that enabling `Test Pulse` on a silent input stream generates audio ($E > 1.0$), and disabling it produces silence.
+- **Test Tone Differentiation**: Confirms significant spectral variance ($\Delta > 5.0$) between low rumble and crisp transient settings.
+- **Ear Scale Response**: Verifies that varying `Ear Scale` from $70\%$ to $130\%$ produces substantial ITD delay and pinna notch shifts ($\Delta > 20.0$).
 - **Null Buffer Immunity**: Asserts resilience against null input/output channel arrays.
 
 ### CLAP Test Suite (`test_clap.c`)
 - **Lifecycle & Activation**: Tests `init()`, `activate()`, and `deactivate()`.
-- **Parameter Validation**: Tests parameter enumeration ($7$ parameters) and string conversions.
-- **NaN / Infinity Immunity**: Injects `NaN` parameter values to ensure the DSP smoothers never corrupt or silence the audio path.
+- **Parameter Validation & Enumeration**: Tests parameter enumeration ($7$ parameters) and string conversions.
 - **State Serialisation Round-Trip**: Verifies that saving state to a stream and restoring it accurately preserves all 7 parameter values across sessions.
+- **Legacy State Migration**: Validates that legacy v1 state archives load cleanly and reset new parameters to factory defaults.
+- **Un-Aliased Near-Field ITD**: Asserts that extreme near-field delay ($5\text{ cm}$, $130\%$ ear scale) arrives at sample $60\text{--}70$ without circular buffer wrapping.
+- **Deterministic Spectral Differentiation**: Dogfoods internal test pulse to verify that crisp transient clicks exhibit $> 2\times$ the spectral first-difference energy of low rumble pulses.
+- **Zero-Input Pulse Synthesis & Silence**: Asserts that `Test Pulse` on silent input produces audible sound, and turning it off restores absolute silence ($< 10^{-12}$).
 
 ---
 
@@ -283,21 +286,19 @@ Execute `build_all.bat`:
 ```cmd
 build_all.bat
 ```
-This batch script will:
-1. Initialise the MSVC x64 developer environment via `vcvars64.bat`.
-2. Compile `RotatingHRTF_v2.clap` in pure C11.
-3. Compile `RotatingHRTF_v2.vst3` and create the bundle directory structure for Ableton Live.
-4. Compile and run `tools\generate_test_pulse.c` in pure C to synthesise `pulsed_pink_noise_48k.wav`.
-5. Compile and run `test_clap.exe` in pure C (dogfooding the generated audio and testing all parameters).
-6. Compile and run `test_vst3.exe` (VST3 host COM interface validation).
-7. Deploy the VST3 bundle to `C:\Program Files\Common Files\VST3\`.
+This batch script performs 5 sequential stages:
+1. **Build CLAP Plugin**: Compiles `RotatingHRTF_v2.clap` in pure C11.
+2. **Build VST3 Plugin**: Compiles `RotatingHRTF_v2.vst3` and creates the standard bundle directory structure for Ableton Live.
+3. **Generate Test Audio**: Compiles and runs `tools\generate_test_pulse.c` in pure C to synthesise reference audio into `pulsed_pink_noise_48k.wav` and `test_signals/`.
+4. **Run Automated Test Suites**: Compiles and runs `test_clap.exe` (pure C dogfooding test harness) and `test_vst3.exe` (VST3 host validation).
+5. **System Deployment**: Copies the VST3 bundle to `C:\Program Files\Common Files\VST3\`.
 
 ---
 
 ## Project Architecture
 
 ```
-g:\dev\hrtf\
+hrtf/
 ├── hrtf_core.h                     # Public HRTF DSP and test generator API
 ├── hrtf_core.c                     # Core audio DSP (biquads, delay, ILD, slewing)
 ├── hrtf_clap.c                     # CLAP plugin wrapper implementation
@@ -327,7 +328,6 @@ g:\dev\hrtf\
 
 ## Engineering Standards
 
-- **Strict British English**: All variable comments, user-facing parameter descriptions, docstrings, and documentation strictly use standard British English spellings (*spatialiser*, *externalisation*, *personalisation*, *customisable*, *metres*, *centre*, *colour*, *initialise*, *optimise*, *artefacts*).
 - **Pure Native C/C++ Toolchain**: All audio generation, automated verification suites, build automation, and CLI utilities are authored entirely in native C and C++.
 - **Deterministic Audio Output**: Bit-exact mathematical parity between the standalone CLI generator and the plugin's internal engine.
 - **Audio Thread Safety**: Zero heap allocations, zero system calls, zero mutexes or locks in any audio rendering callback.
