@@ -87,10 +87,26 @@ echo 3. Building and running automated tests...
 echo ========================================================
 
 cl.exe /nologo /O2 /Iclap-src\include test_clap.c /Fo:build\ /Fe:test_clap.exe
+if errorlevel 1 (
+    echo ERROR: Failed to build test_clap.exe!
+    exit /b 1
+)
 test_clap.exe
+if errorlevel 1 (
+    echo ERROR: test_clap.exe reported failures!
+    exit /b 1
+)
 
 cl.exe /nologo /O2 /std:c++17 /EHsc /MD /I. /Ivst3 /DRELEASE=1 test_vst3.cpp pluginterfaces\base\funknown.cpp public.sdk\source\vst\vstinitiids.cpp ole32.lib /Fo:build\ /Fe:test_vst3.exe
+if errorlevel 1 (
+    echo ERROR: Failed to build test_vst3.exe!
+    exit /b 1
+)
 test_vst3.exe
+if errorlevel 1 (
+    echo ERROR: test_vst3.exe reported failures!
+    exit /b 1
+)
 
 echo.
 echo ========================================================

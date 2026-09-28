@@ -43,6 +43,8 @@ typedef Steinberg::IPluginFactory* (*GetPluginFactoryFunc)();
 
 int main()
 {
+    int failures = 0;
+
     std::cout << "Loading RotatingHRTF_v2.vst3...\n";
     HMODULE lib = LoadLibraryA("RotatingHRTF_v2.vst3");
     if (!lib)
@@ -183,6 +185,11 @@ int main()
 
     res = processor->process(processData);
     std::cout << "Process result (center): " << (res == Steinberg::kResultOk ? "OK" : "FAILED") << "\n";
+    if (res != Steinberg::kResultOk)
+    {
+        std::cerr << "ERROR: process() did not return kResultOk!\n";
+        ++failures;
+    }
 
     float sum_l = 0.0f, sum_r = 0.0f;
     for (int i = 0; i < N; ++i)
@@ -219,7 +226,9 @@ int main()
     }
     else
     {
-        std::cerr << "WARNING: Expected right ear to receive significantly more energy than left ear at 90 deg!\n";
+        std::cerr << "ERROR: expected the right ear to receive significantly more energy than the left at 90 deg (left="
+                  << rot_sum_l << ", right=" << rot_sum_r << ")!\n";
+        ++failures;
     }
 
     if (sum_l > 0.01f && sum_r > 0.01f)
@@ -229,6 +238,7 @@ int main()
     else
     {
         std::cerr << "ERROR: VST3 plugin output was silent!\n";
+        ++failures;
     }
 
     if (comp)
@@ -241,6 +251,12 @@ int main()
 
     exitDll();
     FreeLibrary(lib);
+
+    if (failures > 0)
+    {
+        std::cerr << "VST3 test FAILED (" << failures << " check(s))\n";
+        return 1;
+    }
 
     std::cout << "VST3 test completed successfully!\n";
     return 0;

@@ -37,6 +37,8 @@ int main(void) {
     printf("Plugin count: %u\n", count);
     if (count == 0) {
         printf("No plugins in factory!\n");
+        entry->deinit();
+        FreeLibrary(lib);
         return 1;
     }
 
@@ -111,8 +113,14 @@ int main(void) {
         .out_events = NULL
     };
 
+    int failures = 0;
+
     clap_process_status status = plugin->process(plugin, &process);
     printf("Process status: %d (CLAP_PROCESS_CONTINUE = %d)\n", status, CLAP_PROCESS_CONTINUE);
+    if (status != CLAP_PROCESS_CONTINUE) {
+        printf("ERROR: process() returned %d, expected CLAP_PROCESS_CONTINUE\n", status);
+        ++failures;
+    }
 
     float sum_l = 0.0f, sum_r = 0.0f;
     for (uint32_t i = 0; i < N; ++i) {
@@ -125,12 +133,19 @@ int main(void) {
         printf("SUCCESS: Plugin generated valid binaural audio!\n");
     } else {
         printf("ERROR: Audio output was unexpectedly silent or zero!\n");
+        ++failures;
     }
 
     plugin->deactivate(plugin);
     plugin->destroy(plugin);
     entry->deinit();
     FreeLibrary(lib);
+
+    if (failures > 0) {
+        printf("CLAP test FAILED (%d check(s))\n", failures);
+        return 1;
+    }
+
     printf("CLAP test completed successfully!\n");
     return 0;
 }
