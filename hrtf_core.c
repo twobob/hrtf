@@ -579,7 +579,7 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
            amplitude remains strictly below the -1.0 dBFS soft-limiter threshold (0.89125)
            on full-scale 0 dBFS inputs, ensuring the waveshaper remains transparently idle. */
         const double master_headroom = 0.24;
-        const double space_gain = h->space_smooth * 0.40;
+        const double space_gain = h->space_smooth * 0.70;
 
         /* Distance-dependent Direct-to-Reverberant Ratio (DRR):
            Direct sound drops off with the inverse-distance law (distance_gain).

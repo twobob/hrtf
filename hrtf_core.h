@@ -11,6 +11,8 @@ extern "C" {
 
 typedef struct HrtfCore HrtfCore;
 
+#define HRTF_STATE_VERSION 4
+
 /* distance_m: metres, clamped to 0.05..20.
    rotation_phase: 0..1, periodic; 0=front, .25=right, .5=back, .75=left.
    elevation_deg: degrees, -90..+90; -90=below, 0=horizontal, +90=overhead.
