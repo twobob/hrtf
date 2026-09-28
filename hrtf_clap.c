@@ -3,6 +3,7 @@
 #include <clap/clap.h>
 #include <clap/ext/audio-ports.h>
 #include <clap/ext/params.h>
+#include <clap/ext/state.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -58,6 +59,12 @@ static const clap_plugin_descriptor_t descriptor = {
 static RotatingHrtf *self_from_plugin(const clap_plugin_t *plugin)
 {
     return (RotatingHrtf *)plugin->plugin_data;
+}
+
+static double wrap_unit(double x)
+{
+    x -= floor(x);
+    return x < 0.0 ? x + 1.0 : x;
 }
 
 /* ------------------------------ lifecycle ------------------------------ */
@@ -357,6 +364,65 @@ static const clap_plugin_params_t params_ext = {
     .flush = params_flush
 };
 
+/* ------------------------------ state ------------------------------ */
+
+static const char kStateMagic[4] = { 'H', 'R', 'T', 'F' };
+static const uint32_t kStateVersion = 1;
+
+static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream)
+{
+    RotatingHrtf *p = self_from_plugin(plugin);
+    if (!stream || !stream->write) return false;
+
+    double values[2];
+    values[0] = p->distance_m;
+    values[1] = p->rotation_phase;
+
+    if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
+        return false;
+    if (stream->write(stream, &kStateVersion, sizeof(kStateVersion)) != (int64_t)sizeof(kStateVersion))
+        return false;
+    if (stream->write(stream, values, sizeof(values)) != (int64_t)sizeof(values))
+        return false;
+
+    return true;
+}
+
+static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream)
+{
+    RotatingHrtf *p = self_from_plugin(plugin);
+    if (!stream || !stream->read) return false;
+
+    char magic[4];
+    uint32_t version = 0;
+    double values[2] = { 0.0, 0.0 };
+
+    if (stream->read(stream, magic, sizeof(magic)) != (int64_t)sizeof(magic)) return false;
+    if (memcmp(magic, kStateMagic, sizeof(magic)) != 0) return false;
+    if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
+    if (version != kStateVersion) return false;
+    if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+
+    /* State files travel between machines and versions, so validate before
+       adopting anything from the stream. */
+    if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+        p->distance_m = values[0];
+        if (p->core) hrtf_set_distance(p->core, values[0]);
+    }
+    if (isfinite(values[1])) {
+        double phase = wrap_unit(values[1]);
+        p->rotation_phase = phase;
+        if (p->core) hrtf_set_rotation_phase(p->core, phase);
+    }
+
+    return true;
+}
+
+static const clap_plugin_state_t state_ext = {
+    .save = state_save,
+    .load = state_load
+};
+
 /* ------------------------------ processing ------------------------------ */
 
 static void apply_event(RotatingHrtf *p, const clap_event_header_t *h)
@@ -470,6 +536,7 @@ static const void *plugin_get_extension(const clap_plugin_t *plugin,
     if (!id) return NULL;
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &audio_ports_ext;
     if (strcmp(id, CLAP_EXT_PARAMS) == 0) return &params_ext;
+    if (strcmp(id, CLAP_EXT_STATE) == 0) return &state_ext;
 
     return NULL;
 }

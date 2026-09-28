@@ -23,6 +23,47 @@ static const clap_event_header_t *single_events_get(const clap_input_events_t *l
     return index == 0u ? s->event : NULL;
 }
 
+/* Minimal in-memory clap_ostream / clap_istream pair, for state round-trips. */
+typedef struct {
+    uint8_t data[256];
+    size_t  size;
+    size_t  pos;
+} MemStream;
+
+static int64_t mem_write(const clap_ostream_t *stream, const void *buffer, uint64_t size)
+{
+    MemStream *m = (MemStream *)stream->ctx;
+    if (m->size + (size_t)size > sizeof(m->data)) return -1;
+    memcpy(m->data + m->size, buffer, (size_t)size);
+    m->size += (size_t)size;
+    return (int64_t)size;
+}
+
+static int64_t mem_read(const clap_istream_t *stream, void *buffer, uint64_t size)
+{
+    MemStream *m = (MemStream *)stream->ctx;
+    if (m->pos + (size_t)size > m->size) return -1;
+    memcpy(buffer, m->data + m->pos, (size_t)size);
+    m->pos += (size_t)size;
+    return (int64_t)size;
+}
+
+static void flush_param(const clap_plugin_t *plugin, const clap_plugin_params_t *params,
+                        clap_id id, double value)
+{
+    clap_event_param_value_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.header.size = sizeof(ev);
+    ev.header.space_id = CLAP_CORE_EVENT_SPACE_ID;
+    ev.header.type = CLAP_EVENT_PARAM_VALUE;
+    ev.param_id = id;
+    ev.value = value;
+
+    SingleEvent se = { &ev.header };
+    clap_input_events_t list = { &se, single_events_size, single_events_get };
+    params->flush(plugin, &list, NULL);
+}
+
 int main(void) {
     /* Fail the build without popping up a crash dialog if this harness
        ever faults: the exit code is what the build script reads. */
@@ -239,6 +280,52 @@ int main(void) {
 
         in_audio = saved_in;
         out_audio = saved_out;
+    }
+
+    /* State round-trip: a host saves and restores the plugin through the
+       state extension, which this plugin previously did not implement at
+       all, so CLAP sessions lost their settings on reload. */
+    {
+        const clap_plugin_state_t *state =
+            (const clap_plugin_state_t *)plugin->get_extension(plugin, CLAP_EXT_STATE);
+        if (!state || !state->save || !state->load) {
+            printf("ERROR: the state extension is missing\n");
+            ++failures;
+        } else {
+            MemStream mem;
+            memset(&mem, 0, sizeof(mem));
+            clap_ostream_t os = { &mem, mem_write };
+            clap_istream_t is = { &mem, mem_read };
+
+            flush_param(plugin, params, 2, 0.75);   /* rotation phase */
+            flush_param(plugin, params, 1, 8.0);    /* distance, metres */
+
+            if (!state->save(plugin, &os)) {
+                printf("ERROR: state save failed\n");
+                ++failures;
+            }
+
+            flush_param(plugin, params, 2, 0.25);
+            flush_param(plugin, params, 1, 1.0);
+
+            mem.pos = 0;
+            if (!state->load(plugin, &is)) {
+                printf("ERROR: state load failed\n");
+                ++failures;
+            }
+
+            double d = 0.0, r = 0.0;
+            params->get_value(plugin, 1, &d);
+            params->get_value(plugin, 2, &r);
+            if (fabs(d - 8.0) > 1e-9) {
+                printf("ERROR: distance was not restored (got %f)\n", d);
+                ++failures;
+            }
+            if (fabs(r - 0.75) > 1e-9) {
+                printf("ERROR: rotation was not restored (got %f)\n", r);
+                ++failures;
+            }
+        }
     }
 
     plugin->deactivate(plugin);
