@@ -22,22 +22,24 @@ A 3D binaural spatializer plugin built around an acoustically verified HRTF DSP 
 ## Quick Start: Using in Ableton Live
 
 ### Automatic Installation
-Run [install_ableton.bat](file:///g:/dev/hrtf/install_ableton.bat) as Administrator. It will copy the VST3 bundle directly into:
+Run [install_ableton.bat](file:///g:/dev/hrtf/install_ableton.bat). It elevates itself through UAC if needed and installs the bundle into:
 ```
-C:\Program Files\Common Files\VST3\RotatingHRTF.vst3\Contents\x86_64-win\RotatingHRTF.vst3
+C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3
 ```
+It verifies the copy before reporting success and exits with an error if anything failed. Build first — the script refuses to run without `RotatingHRTF_v2.vst3` in the project root.
 
 ### Manual Installation
-Simply copy [RotatingHRTF.vst3](file:///g:/dev/hrtf/RotatingHRTF.vst3) into:
+Create the bundle folder and copy the built binary into it:
 ```
-C:\Program Files\Common Files\VST3\
+mkdir "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win"
+copy RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win\"
 ```
 
 ### In Ableton Live:
 1. Go to **Preferences -> Plug-Ins**.
 2. Ensure **"Use VST3 Plug-In System Folders"** is turned **ON**.
 3. Click **"Rescan Plug-ins"** (or hold `Alt` while clicking for a full deep rescan).
-4. In Ableton's Browser under **Plug-Ins -> VST3 -> Example Audio**, drag **Rotating HRTF** onto any audio track or MIDI instrument track.
+4. In Ableton's Browser under **Plug-Ins -> VST3 -> Example Audio**, drag **Rotating HRTF v2** onto an audio track (it is an audio effect, not an instrument).
 
 ---
 
@@ -75,10 +77,12 @@ build_all.bat
 ```
 
 This compiles:
-- `RotatingHRTF.clap`
-- `RotatingHRTF.vst3` (and populates `bundle\RotatingHRTF.vst3\Contents\x86_64-win\RotatingHRTF.vst3`)
-- Runs `test_clap.exe` (tests CLAP loading, initialization, processing, and output audio energy)
-- Runs `test_vst3.exe` (tests VST3 loading, COM factory, parameter enumeration, realtime audio processing, and parameter automation)
+- `RotatingHRTF_v2.clap`
+- `RotatingHRTF_v2.vst3` (and populates `bundle\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3`)
+- Runs `test_clap.exe` (CLAP loading, initialization, processing, output audio energy)
+- Runs `test_vst3.exe` (VST3 loading, COM factory, parameter enumeration, audio processing, rotation automation)
+
+Both test hosts exit non-zero when a check fails, and `build_all.bat` stops with an error in that case, so a "completed successfully" banner means the checks really passed. The script also tries to deploy the bundle to the system VST3 folder; that step needs Administrator rights and it reports plainly when it could not write there.
 
 ---
 

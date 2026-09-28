@@ -94,19 +94,22 @@ test_vst3.exe
 
 echo.
 echo ========================================================
-echo 4. Deploying directly to Ableton Live VST3 System Folder...
+echo 4. Deploying to the system VST3 folder...
 echo ========================================================
 
 set TARGET_VST3_DIR=C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win
-if not exist "%TARGET_VST3_DIR%" mkdir "%TARGET_VST3_DIR%"
-copy /y RotatingHRTF_v2.vst3 "%TARGET_VST3_DIR%\RotatingHRTF_v2.vst3"
-copy /y RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3"
+if not exist "%TARGET_VST3_DIR%" mkdir "%TARGET_VST3_DIR%" 2>nul
+copy /y RotatingHRTF_v2.vst3 "%TARGET_VST3_DIR%\RotatingHRTF_v2.vst3" >nul
+if errorlevel 1 (
+    echo NOT DEPLOYED: could not write to "%TARGET_VST3_DIR%".
+    echo               Run install_ableton.bat as Administrator to install.
+) else (
+    echo Deployed to: %TARGET_VST3_DIR%\RotatingHRTF_v2.vst3
+)
 
 echo.
 echo ========================================================
-echo BUILD, TEST AND DEPLOY COMPLETED SUCCESSFULLY!
-echo Deployed to:
-echo   - %TARGET_VST3_DIR%\RotatingHRTF_v2.vst3
+echo BUILD AND TEST COMPLETED SUCCESSFULLY
 echo Artifacts ready:
 echo   - RotatingHRTF_v2.clap (CLAP plugin for Bitwig, Reaper, etc.)
 echo   - RotatingHRTF_v2.vst3 (VST3 plugin for Ableton Live)
