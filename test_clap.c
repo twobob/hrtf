@@ -200,6 +200,47 @@ int main(void) {
         ++failures;
     }
 
+    /* Inactive ports: hosts express them as null buffer arrays. That is a
+       legal state, not a plugin error, and silence in must still render. */
+    {
+        clap_audio_buffer_t saved_in = in_audio;
+        clap_audio_buffer_t saved_out = out_audio;
+
+        out_audio.data32 = NULL;
+        status = plugin->process(plugin, &process);
+        if (status != CLAP_PROCESS_CONTINUE) {
+            printf("ERROR: process() with an inactive output port returned %d\n", status);
+            ++failures;
+        }
+
+        out_audio = saved_out;
+        out_audio.channel_count = 1;
+        status = plugin->process(plugin, &process);
+        if (status != CLAP_PROCESS_CONTINUE) {
+            printf("ERROR: process() with a mono output port returned %d\n", status);
+            ++failures;
+        }
+
+        out_audio = saved_out;
+        in_audio.data32 = NULL;
+        for (uint32_t i = 0; i < N; ++i) { out_l[i] = 0.0f; out_r[i] = 0.0f; }
+        status = plugin->process(plugin, &process);
+        if (status != CLAP_PROCESS_CONTINUE) {
+            printf("ERROR: process() with an inactive input port returned %d\n", status);
+            ++failures;
+        }
+        for (uint32_t i = 0; i < N; ++i) {
+            if (!isfinite(out_l[i]) || !isfinite(out_r[i])) {
+                printf("ERROR: non-finite output for an inactive input port\n");
+                ++failures;
+                break;
+            }
+        }
+
+        in_audio = saved_in;
+        out_audio = saved_out;
+    }
+
     plugin->deactivate(plugin);
     plugin->destroy(plugin);
     entry->deinit();

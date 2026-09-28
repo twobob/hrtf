@@ -31,6 +31,8 @@ typedef struct {
     double distance_m;
     double rotation_phase;
     bool active;
+    float *silence;            /* zeros, used when the input port is inactive */
+    size_t silence_frames;
 } RotatingHrtf;
 
 static const char *features[] = {
@@ -75,6 +77,7 @@ static void plugin_destroy(const clap_plugin_t *plugin)
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!p) return;
     if (p->core) hrtf_destroy(p->core);
+    free(p->silence);
     free(p);
 }
 
@@ -95,6 +98,15 @@ static bool plugin_activate(const clap_plugin_t *plugin,
     p->core = hrtf_create(sample_rate, max_frames_count);
     if (!p->core) return false;
 
+    free(p->silence);
+    p->silence_frames = max_frames_count ? max_frames_count : 1;
+    p->silence = (float *)calloc(p->silence_frames, sizeof(float));
+    if (!p->silence) {
+        hrtf_destroy(p->core);
+        p->core = NULL;
+        return false;
+    }
+
     hrtf_set_distance(p->core, p->distance_m);
     hrtf_set_rotation_phase(p->core, p->rotation_phase);
     hrtf_reset(p->core);
@@ -110,6 +122,9 @@ static void plugin_deactivate(const clap_plugin_t *plugin)
         hrtf_destroy(p->core);
         p->core = NULL;
     }
+    free(p->silence);
+    p->silence = NULL;
+    p->silence_frames = 0;
 }
 
 static bool plugin_start_processing(const clap_plugin_t *plugin)
@@ -360,19 +375,27 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
 {
     RotatingHrtf *p = self_from_plugin(plugin);
 
-    if (!p->core || !process ||
-        process->audio_inputs_count < 1 ||
-        process->audio_outputs_count < 1)
+    if (!p->core || !process)
         return CLAP_PROCESS_ERROR;
 
-    const clap_audio_buffer_t *in = &process->audio_inputs[0];
-    clap_audio_buffer_t *out = &process->audio_outputs[0];
+    /* A port the host has deactivated is expressed as a null data32 array.
+       Nothing to render into is not an error, and neither is silence in. */
+    const clap_audio_buffer_t *in =
+        process->audio_inputs_count > 0 ? &process->audio_inputs[0] : NULL;
+    clap_audio_buffer_t *out =
+        process->audio_outputs_count > 0 ? &process->audio_outputs[0] : NULL;
 
-    if (!in->data32 || !out->data32 ||
-        !in->data32[0] || !out->data32[0] || !out->data32[1])
-        return CLAP_PROCESS_ERROR;
+    if (!out || !out->data32 || out->channel_count < 2 ||
+        !out->data32[0] || !out->data32[1])
+        return CLAP_PROCESS_CONTINUE;
 
-    const float *src = in->data32[0];
+    const bool input_active =
+        in && in->data32 && in->channel_count >= 1 && in->data32[0];
+
+    if (!input_active && process->frames_count > p->silence_frames)
+        return CLAP_PROCESS_ERROR; /* host broke the max_frames_count contract */
+
+    const float *src = input_active ? in->data32[0] : p->silence;
     float *dst_l = out->data32[0];
     float *dst_r = out->data32[1];
 
