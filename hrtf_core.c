@@ -127,6 +127,17 @@ static double biquad_process(Biquad *q, double x)
 
 static double interp_delay(const float *buf, size_t size, double write_pos, double delay)
 {
+    if (delay < 0.0) delay = 0.0;
+
+    /* For delays under 1 sample, the Hermite y_2 tap (i0 + 2) lands past
+       write_pos on unwritten/stale buffer data. Fall back to causal taps. */
+    if (delay < 1.0) {
+        if (delay <= 0.0) return (double)buf[(size_t)write_pos];
+        const size_t iw = (size_t)write_pos;
+        const size_t im1 = (iw + size - 1) % size;
+        return (1.0 - delay) * (double)buf[iw] + delay * (double)buf[im1];
+    }
+
     double p = write_pos - delay;
     while (p < 0.0) p += (double)size;
     while (p >= (double)size) p -= (double)size;
@@ -178,8 +189,8 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     /* Near-field compensation: subtle proximity cue below 1 metre without gain runaway. */
     const double near = (distance < 1.0) ? clampd(1.0 - distance, 0.0, 1.0) : 0.0;
 
-    /* Graph-derived front presence around 3-5 kHz, reduced overhead/below */
-    const double presence = 9.0 * front + 1.0 * rear + 1.5 * near - 3.0 * fabs(v);
+    /* Graph-derived front presence around 3-5 kHz (+6 dB peak), reduced overhead/below */
+    const double presence = 6.0 * front + 1.0 * rear + 1.5 * near - 3.0 * fabs(v);
 
     /* Anthropometric ear scaling:
        scale < 1.0 (smaller head/ears) shifts resonance and notch frequencies higher.
@@ -464,10 +475,14 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         h->delay_l[h->delay_pos] = x;
         h->delay_r[h->delay_pos] = x;
 
+        /* 2-sample delay line read guard: guarantees all 4 Hermite spline taps
+           (y_m1, y_0, y_1, y_2) access strictly causal, written samples. */
+        const double delay_guard = 2.0;
+
         const double xl = interp_delay(h->delay_l, h->delay_size,
-                                       (double)h->delay_pos, dl);
+                                       (double)h->delay_pos, dl + delay_guard);
         const double xr = interp_delay(h->delay_r, h->delay_size,
-                                       (double)h->delay_pos, dr);
+                                       (double)h->delay_pos, dr + delay_guard);
 
         /* Re-design coefficients at a modest control rate. The parameter
            smoother runs at audio rate; 16-sample coefficient updates keep
@@ -491,27 +506,54 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             const size_t sz = h->early_size;
             const size_t pos = h->early_pos;
 
-            const size_t t1 = (pos + sz - (size_t)(0.0048 * h->fs)) % sz; /* Floor */
-            const size_t t2 = (pos + sz - (size_t)(0.0081 * h->fs)) % sz; /* Ceiling */
-            const size_t t3 = (pos + sz - (size_t)(0.0135 * h->fs)) % sz; /* Left wall */
-            const size_t t4 = (pos + sz - (size_t)(0.0162 * h->fs)) % sz; /* Right wall */
-            const size_t t5 = (pos + sz - (size_t)(0.0234 * h->fs)) % sz; /* Back wall */
+            /* Base boundary reflection delay times */
+            const size_t t_floor = (size_t)(0.0048 * h->fs);
+            const size_t t_ceil  = (size_t)(0.0081 * h->fs);
+            const size_t t_wall  = (size_t)(0.0140 * h->fs);
+            const size_t t_rear  = (size_t)(0.0234 * h->fs);
+
+            /* Interaural reflection delays:
+               Reflections arriving from lateral boundaries exhibit ITD (~0.65 ms * ear_scale).
+               This decorrelates the binaural reflection field while maintaining
+               exact Left-Right mathematical symmetry on the median plane (s = 0). */
+            const size_t wall_itd = (size_t)(0.00065 * h->fs * h->ear_scale_smooth);
+            const size_t lateral_itd = (size_t)(fabs(s) * 0.00040 * h->fs * h->ear_scale_smooth);
+
+            const size_t t1_l = (pos + sz - (t_floor + (s > 0.0 ? lateral_itd : 0))) % sz;
+            const size_t t1_r = (pos + sz - (t_floor + (s < 0.0 ? lateral_itd : 0))) % sz;
+
+            const size_t t2_l = (pos + sz - (t_ceil + (s > 0.0 ? lateral_itd : 0))) % sz;
+            const size_t t2_r = (pos + sz - (t_ceil + (s < 0.0 ? lateral_itd : 0))) % sz;
+
+            const size_t t3_l = (pos + sz - t_wall) % sz;
+            const size_t t3_r = (pos + sz - (t_wall + wall_itd)) % sz; /* Left wall reaches right ear later */
+
+            const size_t t4_l = (pos + sz - (t_wall + wall_itd)) % sz; /* Right wall reaches left ear later */
+            const size_t t4_r = (pos + sz - t_wall) % sz;
+
+            const size_t t5_l = (pos + sz - (t_rear + (s > 0.0 ? lateral_itd : 0))) % sz;
+            const size_t t5_r = (pos + sz - (t_rear + (s < 0.0 ? lateral_itd : 0))) % sz;
 
             /* 3D Direction-dependent early reflections:
                Incident energy hitting boundary surfaces scales with source direction cosines:
                - Floor/ceiling modulated by vertical projection v
                - Left/right walls modulated by lateral projection s
                - Rear wall modulated by front/back projection c */
-            const float r1 = h->early_buf[t1] * (float)(0.22 * (1.0 - 0.40 * v));
-            const float r2 = h->early_buf[t2] * (float)(0.20 * (1.0 + 0.40 * v));
-            const float r3 = h->early_buf[t3] * (float)(0.20 * (1.0 - 0.60 * s));
-            const float r4 = h->early_buf[t4] * (float)(0.20 * (1.0 + 0.60 * s));
-            const float r5 = h->early_buf[t5] * (float)(0.16 * (1.0 - 0.50 * c));
+            const float r1_l = h->early_buf[t1_l] * (float)(0.22 * (1.0 - 0.40 * v));
+            const float r1_r = h->early_buf[t1_r] * (float)(0.22 * (1.0 - 0.40 * v));
+            const float r2_l = h->early_buf[t2_l] * (float)(0.20 * (1.0 + 0.40 * v));
+            const float r2_r = h->early_buf[t2_r] * (float)(0.20 * (1.0 + 0.40 * v));
+            const float r3_l = h->early_buf[t3_l] * (float)(0.20 * (1.0 - 0.60 * s));
+            const float r3_r = h->early_buf[t3_r] * (float)(0.20 * (1.0 - 0.60 * s));
+            const float r4_l = h->early_buf[t4_l] * (float)(0.20 * (1.0 + 0.60 * s));
+            const float r4_r = h->early_buf[t4_r] * (float)(0.20 * (1.0 + 0.60 * s));
+            const float r5_l = h->early_buf[t5_l] * (float)(0.16 * (1.0 - 0.50 * c));
+            const float r5_r = h->early_buf[t5_r] * (float)(0.16 * (1.0 - 0.50 * c));
 
-            /* Binaural distribution: lateral wall reflections exhibit acoustic ILD at ears.
+            /* Binaural distribution: lateral wall reflections exhibit acoustic ILD and ITD at ears.
                Median plane (s = 0) remains mathematically symmetric. */
-            const double raw_l = r1 + r2 + r3 + 0.25 * r4 + r5;
-            const double raw_r = r1 + r2 + 0.25 * r3 + r4 + r5;
+            const double raw_l = r1_l + r2_l + r3_l + 0.25 * r4_l + r5_l;
+            const double raw_r = r1_r + r2_r + 0.25 * r3_r + r4_r + r5_r;
 
             /* Gentle 1-pole wall absorption filter */
             h->early_lpf_l = 0.65 * raw_l + 0.35 * h->early_lpf_l;
@@ -521,9 +563,10 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             if (h->early_pos >= h->early_size) h->early_pos = 0;
         }
 
-        /* Master headroom scale (0.50 = -6.0 dBFS) to ensure pinna resonance peaks
-           do not overdrive the soft-limiter on 0 dBFS inputs. */
-        const double master_headroom = 0.50;
+        /* Master headroom scale (0.35 = -9.1 dBFS):
+           With +6 dB pinna presence boost, peak gain is +6.0 dB - 9.1 dB = -3.1 dBFS,
+           ensuring resonance peaks do not overdrive the soft-limiter (threshold -1 dBFS) on 0 dBFS inputs. */
+        const double master_headroom = 0.35;
         const double space_gain = h->space_smooth * 0.40;
 
         /* Distance-dependent Direct-to-Reverberant Ratio (DRR):
