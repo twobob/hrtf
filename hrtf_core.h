@@ -3,6 +3,7 @@
 #define HRTF_CORE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,20 @@ void hrtf_set_rotation_phase(HrtfCore *h, double phase);
 void hrtf_set_elevation_deg(HrtfCore *h, double elevation_deg);
 void hrtf_set_space(HrtfCore *h, double space_01);
 void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n);
+
+/* Psychoacoustically calibrated pulsed pink noise test generator */
+typedef struct HrtfTestGen {
+    double sample_rate;
+    unsigned int prng_state;
+    float b0, b1, b2, b3, b4, b5, b6;
+    double free_sample_counter;
+} HrtfTestGen;
+
+/* Initialise the test pulse generator state */
+void hrtf_test_gen_init(HrtfTestGen *gen, double sample_rate);
+
+/* Synthesise 200 ms pink noise bursts on each beat */
+void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double bpm, double beat_pos, int is_playing);
 
 #ifdef __cplusplus
 }

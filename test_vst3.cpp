@@ -499,6 +499,50 @@ int main()
         releaseProcessor (p);
     }
 
+    // Test Pulse Generator: when Test Pulse is enabled, silent input produces audible pulsed output
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor)
+        {
+            const int NP = 256;
+            float zero_in[NP] = {0};
+            float pulse_l[NP] = {0}, pulse_r[NP] = {0};
+
+            float* inPtrs[2] = { zero_in, zero_in };
+            float* outPtrs[2] = { pulse_l, pulse_r };
+            Steinberg::Vst::AudioBusBuffers inBus = {};
+            inBus.numChannels = 2; inBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers outBus = {};
+            outBus.numChannels = 2; outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::ProcessData data = {};
+            data.processMode = Steinberg::Vst::kRealtime;
+            data.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data.numSamples = NP;
+            data.numInputs = 1; data.inputs = &inBus;
+            data.numOutputs = 1; data.outputs = &outBus;
+
+            DummyChanges pulseChanges;
+            pulseChanges.q.id = RotatingHrtf::kParamTestPulse;
+            pulseChanges.q.val = 1.0; // Enabled
+            data.inputParameterChanges = &pulseChanges;
+
+            p.processor->process (data);
+
+            double pulse_energy = 0.0;
+            for (int i = 0; i < NP; ++i) {
+                pulse_energy += std::abs (pulse_l[i]) + std::abs (pulse_r[i]);
+            }
+
+            if (pulse_energy > 0.01) {
+                std::cout << "SUCCESS: Test Pulse generator synthesised audio from silent input (energy=" << pulse_energy << ").\n";
+            } else {
+                std::cerr << "ERROR: Test Pulse generator failed to produce audio from silent input (energy=" << pulse_energy << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p);
+    }
+
     // Regression: the VST3 spec allows null sample buffers when a bus is
     // inactive. process() used to dereference them and take the host down.
     {

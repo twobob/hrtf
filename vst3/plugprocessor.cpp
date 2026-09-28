@@ -2,6 +2,7 @@
 #include "plugids.h"
 #include "base/source/fstreamer.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
+#include "pluginterfaces/vst/ivstprocesscontext.h"
 #include <algorithm>
 #include <cmath>
 
@@ -65,6 +66,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setupProcessing (Steinberg::Vst::Pr
 {
     mSampleRate = setup.sampleRate;
     mMonoBuffer.resize (setup.maxSamplesPerBlock > 0 ? setup.maxSamplesPerBlock : 1024);
+    hrtf_test_gen_init (&mTestGen, mSampleRate);
     return AudioEffect::setupProcessing (setup);
 }
 
@@ -156,6 +158,10 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
         if (mCore)
             hrtf_set_space (mCore, value);
     }
+    else if (id == kParamTestPulse)
+    {
+        mTestPulseNorm = value;
+    }
 }
 
 Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessData& data)
@@ -225,8 +231,6 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
         const Steinberg::int32 windowStart = cursor;
         const Steinberg::int32 windowEnd = windowStart + windowFrames;
 
-        copyMono (inBus, mono, windowStart, windowFrames);
-
         while (cursor < windowEnd)
         {
             Steinberg::int32 next = windowEnd;
@@ -260,9 +264,43 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 
             if (next <= cursor) break; /* no forward progress: stop rather than spin */
 
+            const Steinberg::int32 sliceFrames = next - cursor;
+            if (mTestPulseNorm >= 0.5)
+            {
+                double bpm = 120.0;
+                double beatPos = 0.0;
+                int isPlaying = 0;
+                if (data.processContext)
+                {
+                    if ((data.processContext->state & Steinberg::Vst::ProcessContext::kTempoValid) &&
+                        data.processContext->tempo > 1.0)
+                    {
+                        bpm = data.processContext->tempo;
+                    }
+                    if (data.processContext->state & Steinberg::Vst::ProcessContext::kProjectTimeMusicValid)
+                    {
+                        beatPos = data.processContext->projectTimeMusic;
+                    }
+                    if (data.processContext->state & Steinberg::Vst::ProcessContext::kPlaying)
+                    {
+                        isPlaying = 1;
+                    }
+                }
+                double sliceBeat = beatPos;
+                if (isPlaying && mSampleRate > 1000.0)
+                {
+                    sliceBeat += (double)cursor * (bpm / (60.0 * mSampleRate));
+                }
+                hrtf_test_gen_process (&mTestGen, mono, (size_t)sliceFrames, bpm, sliceBeat, isPlaying);
+            }
+            else
+            {
+                copyMono (inBus, mono, cursor, sliceFrames);
+            }
+
             float* outSeg[2] = { outBus.channelBuffers32[0] + cursor,
                                  outBus.channelBuffers32[1] + cursor };
-            hrtf_process (mCore, mono + (cursor - windowStart), outSeg, (size_t)(next - cursor));
+            hrtf_process (mCore, mono, outSeg, (size_t)sliceFrames);
             cursor = next;
         }
     }
@@ -281,7 +319,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != 1 && version != 2 && version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
@@ -306,6 +344,15 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
             mSpaceNorm = sNorm;
     }
 
+    if (version >= 3)
+    {
+        double pNorm = 0.0;
+        if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
+
+        if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
+            mTestPulseNorm = pNorm;
+    }
+
     if (mCore)
     {
         double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
@@ -328,6 +375,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     streamer.writeDouble (mRotationNorm);
     streamer.writeDouble (mElevationNorm);
     streamer.writeDouble (mSpaceNorm);
+    streamer.writeDouble (mTestPulseNorm);
 
     return Steinberg::kResultOk;
 }

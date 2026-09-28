@@ -51,8 +51,18 @@ copy RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vs
 | **Rotation** | 0.0 – 360.0 | 0.0 | degrees (`deg`) | Horizontal azimuth angle. `0°` = Front, `90°` = Right ear, `180°` = Rear, `270°` = Left ear. |
 | **Elevation** | -90.0 – +90.0 | 0.0 | degrees (`deg`) | Vertical angle. `-90°` = Below, `0°` = Horizontal plane, `+90°` = Directly overhead. Dynamically modulates pinna concha notches. |
 | **Space** | 0.0 – 100.0 | 15.0 | percent (`%`) | Room boundary early reflection externalisation engine. Pulls audio outside the skull into a natural acoustic room. |
+| **Test Pulse** | Off / On (0 / 1) | Off | toggle | Built-in test pulse generator. Synthesises psychoacoustically calibrated 200 ms pink noise bursts on each beat (tempo-synchronised to the host). |
 
 All parameters feature smooth exponential slewing (20–50 ms) inside [hrtf_core.c](file:///g:/dev/hrtf/hrtf_core.c) to prevent clicking or zipper noise during automation.
+
+---
+
+## Calibration & Test Signals
+
+For critical acoustic verification, the repository includes psychoacoustically calibrated test signals:
+- `pulsed_pink_noise_48k.wav`: 48 kHz, 24-bit PCM mono loopable WAV (8 beats at 120 BPM). Each beat fires a 200 ms burst of $1/f$ pink noise with 5 ms Hann onsets and decays.
+- `tools/generate_test_pulse.py`: Standalone Python script to regenerate test WAV signals with custom duration, tempo, or sample rates.
+- **Built-in Test Pulse Tick Box**: Available directly inside the VST3 and CLAP plugin as a dedicated toggle parameter. When enabled, it replaces the track input with the beat-synchronised pink noise pulse, allowing direct 3D positioning adjustments in Ableton Live without requiring external audio tracks.
 
 ---
 

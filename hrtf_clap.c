@@ -23,7 +23,8 @@ enum {
     PARAM_DISTANCE = 1,
     PARAM_ROTATION = 2,
     PARAM_ELEVATION = 3,
-    PARAM_SPACE = 4
+    PARAM_SPACE = 4,
+    PARAM_TEST_PULSE = 5
 };
 
 typedef struct {
@@ -35,9 +36,12 @@ typedef struct {
     double rotation_phase;
     double elevation_deg;
     double space;
+    double test_pulse;
+    HrtfTestGen test_gen;
     bool active;
     float *silence;            /* zeros, used when the input port is inactive */
     size_t silence_frames;
+    float *test_buf;           /* scratch buffer for synthesised test pulses */
 } RotatingHrtf;
 
 static const char *features[] = {
@@ -81,6 +85,8 @@ static bool plugin_init(const clap_plugin_t *plugin)
     p->rotation_phase = 0.0;
     p->elevation_deg = 0.0;
     p->space = 0.15;
+    p->test_pulse = 0.0;
+    hrtf_test_gen_init(&p->test_gen, p->sample_rate);
     p->active = false;
     return true;
 }
@@ -91,6 +97,7 @@ static void plugin_destroy(const clap_plugin_t *plugin)
     if (!p) return;
     if (p->core) hrtf_destroy(p->core);
     free(p->silence);
+    free(p->test_buf);
     free(p);
 }
 
@@ -112,9 +119,18 @@ static bool plugin_activate(const clap_plugin_t *plugin,
     if (!p->core) return false;
 
     free(p->silence);
+    free(p->test_buf);
     p->silence_frames = max_frames_count ? max_frames_count : 1;
     p->silence = (float *)calloc(p->silence_frames, sizeof(float));
     if (!p->silence) {
+        hrtf_destroy(p->core);
+        p->core = NULL;
+        return false;
+    }
+    p->test_buf = (float *)calloc(p->silence_frames, sizeof(float));
+    if (!p->test_buf) {
+        free(p->silence);
+        p->silence = NULL;
         hrtf_destroy(p->core);
         p->core = NULL;
         return false;
@@ -124,6 +140,7 @@ static bool plugin_activate(const clap_plugin_t *plugin,
     hrtf_set_rotation_phase(p->core, p->rotation_phase);
     hrtf_set_elevation_deg(p->core, p->elevation_deg);
     hrtf_set_space(p->core, p->space);
+    hrtf_test_gen_init(&p->test_gen, sample_rate);
     hrtf_reset(p->core);
     p->active = true;
     return true;
@@ -139,6 +156,8 @@ static void plugin_deactivate(const clap_plugin_t *plugin)
     }
     free(p->silence);
     p->silence = NULL;
+    free(p->test_buf);
+    p->test_buf = NULL;
     p->silence_frames = 0;
 }
 
@@ -205,7 +224,7 @@ static const clap_plugin_audio_ports_t audio_ports_ext = {
 static uint32_t params_count(const clap_plugin_t *plugin)
 {
     (void)plugin;
-    return 4u;
+    return 5u;
 }
 
 static bool params_get_info(const clap_plugin_t *plugin,
@@ -213,7 +232,7 @@ static bool params_get_info(const clap_plugin_t *plugin,
                             clap_param_info_t *info)
 {
     (void)plugin;
-    if (!info || index >= 4u) return false;
+    if (!info || index >= 5u) return false;
 
     memset(info, 0, sizeof(*info));
 
@@ -251,6 +270,16 @@ static bool params_get_info(const clap_plugin_t *plugin,
         info->min_value = 0.0;
         info->max_value = 1.0;
         info->default_value = 0.15;
+    } else if (index == 4u) {
+        info->id = PARAM_TEST_PULSE;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE |
+                      CLAP_PARAM_IS_STEPPED |
+                      CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Test Pulse");
+        snprintf(info->module, sizeof(info->module), "Generator");
+        info->min_value = 0.0;
+        info->max_value = 1.0;
+        info->default_value = 0.0;
     }
     return true;
 }
@@ -276,6 +305,10 @@ static bool params_get_value(const clap_plugin_t *plugin,
     }
     if (param_id == PARAM_SPACE) {
         *out_value = p->space;
+        return true;
+    }
+    if (param_id == PARAM_TEST_PULSE) {
+        *out_value = p->test_pulse;
         return true;
     }
     return false;
@@ -306,6 +339,10 @@ static bool params_value_to_text(const clap_plugin_t *plugin,
     }
     if (param_id == PARAM_SPACE) {
         snprintf(out_buffer, out_buffer_capacity, "%.0f %%", value * 100.0);
+        return true;
+    }
+    if (param_id == PARAM_TEST_PULSE) {
+        snprintf(out_buffer, out_buffer_capacity, "%s", value >= 0.5 ? "On" : "Off");
         return true;
     }
     return false;
@@ -375,6 +412,19 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
         return true;
     }
 
+    if (param_id == PARAM_TEST_PULSE) {
+        if (_stricmp(text, "on") == 0 || strcmp(text, "1") == 0) {
+            *out_value = 1.0;
+            return true;
+        }
+        if (_stricmp(text, "off") == 0 || strcmp(text, "0") == 0) {
+            *out_value = 0.0;
+            return true;
+        }
+        *out_value = (v >= 0.5) ? 1.0 : 0.0;
+        return true;
+    }
+
     return false;
 }
 
@@ -404,6 +454,8 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
         if (value > 1.0) value = 1.0;
         p->space = value;
         if (p->core) hrtf_set_space(p->core, value);
+    } else if (id == PARAM_TEST_PULSE) {
+        p->test_pulse = (value >= 0.5) ? 1.0 : 0.0;
     }
 }
 
@@ -440,18 +492,19 @@ static const clap_plugin_params_t params_ext = {
 /* ------------------------------ state ------------------------------ */
 
 static const char kStateMagic[4] = { 'H', 'R', 'T', 'F' };
-static const uint32_t kStateVersion = 2;
+static const uint32_t kStateVersion = 3;
 
 static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!stream || !stream->write) return false;
 
-    double values[4];
+    double values[5];
     values[0] = p->distance_m;
     values[1] = p->rotation_phase;
     values[2] = p->elevation_deg;
     values[3] = p->space;
+    values[4] = p->test_pulse;
 
     if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
         return false;
@@ -474,7 +527,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, magic, sizeof(magic)) != (int64_t)sizeof(magic)) return false;
     if (memcmp(magic, kStateMagic, sizeof(magic)) != 0) return false;
     if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
-    if (version != 1 && version != kStateVersion) return false;
+    if (version != 1 && version != 2 && version != kStateVersion) return false;
 
     if (version == 1) {
         double values[2] = { 0.0, 0.0 };
@@ -490,6 +543,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         }
         p->elevation_deg = 0.0;
         p->space = 0.15;
+        p->test_pulse = 0.0;
         if (p->core) {
             hrtf_set_elevation_deg(p->core, 0.0);
             hrtf_set_space(p->core, 0.15);
@@ -513,6 +567,30 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
             p->space = values[3];
             if (p->core) hrtf_set_space(p->core, values[3]);
+        }
+        p->test_pulse = 0.0;
+    } else if (version == 3) {
+        double values[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
+        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+            p->distance_m = values[0];
+            if (p->core) hrtf_set_distance(p->core, values[0]);
+        }
+        if (isfinite(values[1])) {
+            double phase = wrap_unit(values[1]);
+            p->rotation_phase = phase;
+            if (p->core) hrtf_set_rotation_phase(p->core, phase);
+        }
+        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
+            p->elevation_deg = values[2];
+            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
+        }
+        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
+            p->space = values[3];
+            if (p->core) hrtf_set_space(p->core, values[3]);
+        }
+        if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
+            p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
         }
     }
 
@@ -591,12 +669,37 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         }
 
         if (next > cursor) {
-            hrtf_process(p->core, src + cursor, dst, next - cursor);
+            const uint32_t slice = next - cursor;
+            const float *segment_src = NULL;
+
+            if (p->test_pulse >= 0.5) {
+                double bpm = 120.0;
+                double beat_pos = 0.0;
+                int is_playing = 0;
+                if (process->transport) {
+                    if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && process->transport->tempo > 1.0)
+                        bpm = process->transport->tempo;
+                    if (process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
+                        beat_pos = (double)process->transport->song_pos_beats / (double)CLAP_BEATTIME_FACTOR;
+                    if (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)
+                        is_playing = 1;
+                }
+                double slice_beat = beat_pos;
+                if (is_playing && p->sample_rate > 1000.0) {
+                    slice_beat += (double)cursor * (bpm / (60.0 * p->sample_rate));
+                }
+                hrtf_test_gen_process(&p->test_gen, p->test_buf, slice, bpm, slice_beat, is_playing);
+                segment_src = p->test_buf;
+            } else {
+                segment_src = src + cursor;
+            }
+
+            hrtf_process(p->core, segment_src, dst, slice);
 
             /* hrtf_process writes from the start of dst, so offset the
                output pointers for the next segment. */
-            dst[0] += next - cursor;
-            dst[1] += next - cursor;
+            dst[0] += slice;
+            dst[1] += slice;
             cursor = next;
         }
 
@@ -621,7 +724,32 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
 
     /* No-event path and any remaining frames. */
     if (cursor < frame_count) {
-        hrtf_process(p->core, src + cursor, dst, frame_count - cursor);
+        const uint32_t slice = frame_count - cursor;
+        const float *segment_src = NULL;
+
+        if (p->test_pulse >= 0.5) {
+            double bpm = 120.0;
+            double beat_pos = 0.0;
+            int is_playing = 0;
+            if (process->transport) {
+                if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && process->transport->tempo > 1.0)
+                    bpm = process->transport->tempo;
+                if (process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
+                    beat_pos = (double)process->transport->song_pos_beats / (double)CLAP_BEATTIME_FACTOR;
+                if (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)
+                    is_playing = 1;
+            }
+            double slice_beat = beat_pos;
+            if (is_playing && p->sample_rate > 1000.0) {
+                slice_beat += (double)cursor * (bpm / (60.0 * p->sample_rate));
+            }
+            hrtf_test_gen_process(&p->test_gen, p->test_buf, slice, bpm, slice_beat, is_playing);
+            segment_src = p->test_buf;
+        } else {
+            segment_src = src + cursor;
+        }
+
+        hrtf_process(p->core, segment_src, dst, slice);
     }
 
     return CLAP_PROCESS_CONTINUE;

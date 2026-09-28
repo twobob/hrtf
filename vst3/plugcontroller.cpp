@@ -40,6 +40,13 @@ Steinberg::tresult PLUGIN_API PlugController::initialize (Steinberg::FUnknown* c
         Steinberg::Vst::ParameterInfo::kCanAutomate);
     parameters.addParameter (spaceParam);
 
+    // Test Pulse parameter: Off (0) / On (1), default Off (tick box in Ableton Live)
+    auto* pulseParam = new Steinberg::Vst::RangeParameter (
+        STR16 ("Test Pulse"), kParamTestPulse, STR16 (""),
+        0.0, 1.0, 0.0, 1,
+        Steinberg::Vst::ParameterInfo::kCanAutomate);
+    parameters.addParameter (pulseParam);
+
     return Steinberg::kResultTrue;
 }
 
@@ -50,7 +57,7 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != 1 && version != 2 && version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
@@ -71,6 +78,15 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
             setParamNormalized (kParamElevation, eNorm);
         if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
             setParamNormalized (kParamSpace, sNorm);
+    }
+
+    if (version >= 3)
+    {
+        double pNorm = 0.0;
+        if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
+
+        if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
+            setParamNormalized (kParamTestPulse, pNorm);
     }
 
     return Steinberg::kResultOk;

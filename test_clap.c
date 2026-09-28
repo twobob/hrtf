@@ -301,6 +301,7 @@ int main(void) {
             flush_param(plugin, params, 1, 8.0);    /* distance, metres */
             flush_param(plugin, params, 3, 30.0);   /* elevation, degrees */
             flush_param(plugin, params, 4, 0.40);   /* space, 0..1 */
+            flush_param(plugin, params, 5, 1.0);    /* test pulse, on */
 
             if (!state->save(plugin, &os)) {
                 printf("ERROR: state save failed\n");
@@ -311,6 +312,7 @@ int main(void) {
             flush_param(plugin, params, 1, 1.0);
             flush_param(plugin, params, 3, 0.0);
             flush_param(plugin, params, 4, 0.0);
+            flush_param(plugin, params, 5, 0.0);
 
             mem.pos = 0;
             if (!state->load(plugin, &is)) {
@@ -318,11 +320,12 @@ int main(void) {
                 ++failures;
             }
 
-            double d = 0.0, r = 0.0, e = 0.0, s = 0.0;
+            double d = 0.0, r = 0.0, e = 0.0, s = 0.0, p_val = 0.0;
             params->get_value(plugin, 1, &d);
             params->get_value(plugin, 2, &r);
             params->get_value(plugin, 3, &e);
             params->get_value(plugin, 4, &s);
+            params->get_value(plugin, 5, &p_val);
             if (fabs(d - 8.0) > 1e-9) {
                 printf("ERROR: distance was not restored (got %f)\n", d);
                 ++failures;
@@ -337,6 +340,30 @@ int main(void) {
             }
             if (fabs(s - 0.40) > 1e-9) {
                 printf("ERROR: space was not restored (got %f)\n", s);
+                ++failures;
+            }
+            if (fabs(p_val - 1.0) > 1e-9) {
+                printf("ERROR: test pulse was not restored (got %f)\n", p_val);
+                ++failures;
+            } else {
+                printf("SUCCESS: state round-trip preserved all 5 parameters.\n");
+            }
+
+            /* Test internal pulse generation with silent input */
+            for (uint32_t i = 0; i < N; ++i) {
+                in_buf[i] = 0.0f;
+                out_l[i] = 0.0f;
+                out_r[i] = 0.0f;
+            }
+            plugin->process(plugin, &process);
+            float pulse_sum = 0.0f;
+            for (uint32_t i = 0; i < N; ++i) {
+                pulse_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+            }
+            if (pulse_sum > 0.01f) {
+                printf("SUCCESS: Test pulse generator synthesised audio from silent input.\n");
+            } else {
+                printf("ERROR: Test pulse generator failed to synthesise audio (sum=%f)\n", pulse_sum);
                 ++failures;
             }
         }

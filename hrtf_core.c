@@ -471,3 +471,84 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         if (h->delay_pos >= h->delay_size) h->delay_pos = 0;
     }
 }
+
+/* -------------------------------------------------------------------------
+   Test Signal Generator: 200 ms 1/f Pink Noise Bursts on Each Beat
+   ------------------------------------------------------------------------- */
+
+void hrtf_test_gen_init(HrtfTestGen *gen, double sample_rate)
+{
+    if (!gen) return;
+    memset(gen, 0, sizeof(*gen));
+    gen->sample_rate = sample_rate > 1000.0 ? sample_rate : 48000.0;
+    gen->prng_state = 0x5A17F00Du;
+}
+
+void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double bpm, double beat_pos, int is_playing)
+{
+    if (!gen || !out_mono || n == 0) return;
+
+    if (bpm < 20.0 || bpm > 400.0 || !isfinite(bpm))
+        bpm = 120.0;
+
+    const double fs = gen->sample_rate;
+    const double sec_per_beat = 60.0 / bpm;
+    const double samples_per_beat = fs * sec_per_beat;
+
+    /* Pulse duration: 200 ms calibrated window, capped at 60% of beat duration */
+    double pulse_dur = 0.200;
+    if (pulse_dur > 0.60 * sec_per_beat)
+        pulse_dur = 0.60 * sec_per_beat;
+
+    const double t_att = 0.005; /* 5 ms attack */
+    const double t_rel = 0.005; /* 5 ms release */
+    const double beats_per_sample = bpm / (60.0 * fs);
+
+    for (size_t i = 0; i < n; ++i) {
+        double t_in_beat = 0.0;
+
+        if (is_playing) {
+            double current_beat = beat_pos + (double)i * beats_per_sample;
+            double phase = current_beat - floor(current_beat);
+            t_in_beat = phase * sec_per_beat;
+            gen->free_sample_counter = phase * samples_per_beat;
+        } else {
+            t_in_beat = gen->free_sample_counter / fs;
+            gen->free_sample_counter += 1.0;
+            if (gen->free_sample_counter >= samples_per_beat)
+                gen->free_sample_counter -= samples_per_beat;
+        }
+
+        /* Calculate raised-cosine (Hann) envelope */
+        float envelope = 0.0f;
+        if (t_in_beat >= 0.0 && t_in_beat < pulse_dur) {
+            if (t_in_beat < t_att) {
+                envelope = 0.5f * (1.0f - (float)cos(HRTF_PI * t_in_beat / t_att));
+            } else if (t_in_beat > pulse_dur - t_rel) {
+                envelope = 0.5f * (1.0f + (float)cos(HRTF_PI * (t_in_beat - (pulse_dur - t_rel)) / t_rel));
+            } else {
+                envelope = 1.0f;
+            }
+        }
+
+        /* 32-bit xorshift PRNG */
+        gen->prng_state ^= gen->prng_state << 13;
+        gen->prng_state ^= gen->prng_state >> 17;
+        gen->prng_state ^= gen->prng_state << 5;
+        float white = (float)(int32_t)gen->prng_state * (1.0f / 2147483648.0f);
+
+        /* Paul Kellet's refined 7-pole 1/f pink noise filter */
+        gen->b0 = 0.99886f * gen->b0 + white * 0.0555179f;
+        gen->b1 = 0.99332f * gen->b1 + white * 0.0750759f;
+        gen->b2 = 0.96900f * gen->b2 + white * 0.1538520f;
+        gen->b3 = 0.86650f * gen->b3 + white * 0.3104856f;
+        gen->b4 = 0.55000f * gen->b4 + white * 0.5329522f;
+        gen->b5 = -0.7616f * gen->b5 - white * 0.0168980f;
+        float pink = gen->b0 + gen->b1 + gen->b2 + gen->b3 + gen->b4 + gen->b5 + gen->b6 + white * 0.5362f;
+        gen->b6 = white * 0.115926f;
+
+        /* Calibrated output level (-14 dBFS nominal burst RMS) */
+        out_mono[i] = pink * 0.18f * envelope;
+    }
+}
+
