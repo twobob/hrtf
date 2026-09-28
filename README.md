@@ -13,7 +13,7 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
 3. [Plugin Formats](#plugin-formats)
 4. [Parameters Reference](#parameters-reference)
 5. [Ableton Live Integration Guide](#ableton-live-integration-guide)
-6. [Test Signal Generator & Pure C CLI](#test-signal-generator--pure-c-cli)
+6. [Test Signal Generator CLI](#test-signal-generator-cli)
 7. [Automated Verification & Test Harness](#automated-verification--test-harness)
 8. [Building from Source](#building-from-source)
 9. [Project Architecture](#project-architecture)
@@ -155,10 +155,10 @@ copy /y RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2
 
 ---
 
-## Test Signal Generator & Pure C CLI
+## Test Signal Generator CLI
 
 ### Standalone CLI Tool: `tools/generate_test_pulse.c`
-A pure C command-line tool directly linking with `hrtf_core.c` to generate psychoacoustically calibrated WAV files with exact DSP parity to the plugin.
+A command-line tool directly linking with `hrtf_core.c` to generate psychoacoustically calibrated WAV files with exact DSP parity to the plugin.
 
 #### Compilation:
 ```cmd
@@ -167,7 +167,7 @@ cl.exe /nologo /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:bu
 
 #### CLI Options:
 ```text
-Rotating HRTF Test Pulse Generator (Pure C CLI)
+Rotating HRTF Test Pulse Generator (CLI)
 Synthesises calibrated test signals for 3D HRTF spatialisation benchmarking.
 
 Usage: generate_test_pulse [options]
@@ -250,10 +250,10 @@ Execute `build_all.bat`:
 build_all.bat
 ```
 This batch script performs 5 sequential stages:
-1. **Build CLAP Plugin**: Compiles `RotatingHRTF_v2.clap` in pure C11.
+1. **Build CLAP Plugin**: Compiles `RotatingHRTF_v2.clap`.
 2. **Build VST3 Plugin**: Compiles `RotatingHRTF_v2.vst3` and creates the standard bundle directory structure for Ableton Live.
-3. **Generate Test Audio**: Compiles and runs `tools\generate_test_pulse.c` in pure C to synthesise reference audio into `pulsed_pink_noise_48k.wav` and `test_signals/`.
-4. **Run Automated Test Suites**: Compiles and runs `test_clap.exe` (pure C dogfooding test harness) and `test_vst3.exe` (VST3 host validation).
+3. **Generate Test Audio**: Compiles and runs `tools\generate_test_pulse.c` to synthesise reference audio into `pulsed_pink_noise_48k.wav` and `test_signals/`.
+4. **Run Automated Test Suites**: Compiles and runs `test_clap.exe` (CLAP test harness) and `test_vst3.exe` (VST3 host validation).
 5. **System Deployment**: Copies the VST3 bundle to `C:\Program Files\Common Files\VST3\`.
 
 ---
@@ -270,7 +270,7 @@ hrtf/
 ├── test_clap.c                     # Automated test harness for CLAP
 ├── test_vst3.cpp                   # Automated test harness for VST3
 ├── tools/
-│   └── generate_test_pulse.c       # Pure C standalone CLI audio synthesiser
+│   └── generate_test_pulse.c       # Standalone CLI audio synthesiser
 ├── vst3/
 │   ├── plugids.h                   # VST3 GUIDs, parameter IDs, state version
 │   ├── plugprocessor.h             # VST3 audio processor declaration
