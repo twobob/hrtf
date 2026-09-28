@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------
 /build/
 /bundle/
-/dist/
+/dist/*
 !/dist/release_notes.md
 *.obj
 *.lib
