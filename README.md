@@ -2,7 +2,7 @@
 
 A high-performance, real-time 3D binaural spatialiser audio plugin built upon an acoustically calibrated Head-Related Transfer Function (HRTF) DSP core. It simulates spherical head acoustic shadow, interaural time delays, distance attenuation, near-field curvature divergence, anthropometric pinna and skull scaling, and room boundary reflections for headphones and stereo monitoring.
 
-Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and dogfooding test harness) with a minimal C++17 VST3 wrapper strictly for Ableton Live compatibility. Strictly zero runtime dependencies and zero Python tooling.
+Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and dogfooding test harness) with a minimal C++17 VST3 wrapper strictly for Ableton Live compatibility. Fully self-contained native C and C++ architecture built using standard MSVC tools.
 
 ---
 
@@ -24,12 +24,14 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
 ## Features & Capabilities
 
 - **Binaural 3D Positioning**: Full $360^\circ$ horizontal azimuth rotation and $-90^\circ$ to $+90^\circ$ vertical elevation.
-- **Physical Inverse-Distance Law**: $1/d$ free-field distance attenuation referenced to $1\text{ m}$, with a safety gain cap at $0\text{ dBFS}$ for distances $< 1\text{ m}$.
+- **Physical Inverse-Distance Law & Near-Field Intimacy**: Follows $1/d$ free-field distance attenuation referenced to $1\text{ m}$, with smooth near-field proximity gain (up to $+3\text{ dB}$ at $5\text{ cm}$) providing natural auditory intimacy close to the ear.
 - **Distance Variation Function (DVF)**: Near-field wavefront curvature produces up to $+9.5\text{ dB}$ of low-frequency Interaural Level Difference (ILD) divergence at $5\text{ cm}$.
+- **Woodworth Spherical Ray-Tracing ITD**: Physical spherical head acoustic ray-tracing model with 4-point Hermite cubic fractional delay interpolation, preserving flat frequency response across all angles.
+- **Frequency-Dependent Cranial Head Shadow**: Differentiates low-frequency spherical diffraction ($-4\text{ dB}$ LF shadow) from deep high-frequency shadowing (up to $-13\text{ dB}$ HF shadow).
+- **3D Directional Room Boundaries & Distance-Dependent DRR**: Early reflections dynamically modulated by source direction cosines $(s, c, v)$ and decoupled from direct sound to establish an authentic Direct-to-Reverberant Ratio gradient with distance.
 - **Anthropometric Head & Pinna Scaling**: Adjust head circumference and ear dimensions from $70\%$ to $130\%$, scaling ITD time delays and shifting spectral pinna notch frequencies accordingly.
-- **Room Boundary Externalisation**: Early reflection engine simulating floor, ceiling, and wall boundaries with frequency-dependent surface absorption to pull audio outside the skull.
 - **Integrated Psychoacoustic Test Pulse Generator**: Built-in tick-box generator synthesising tempo-aligned pulses (pink noise, sine, or Dirac clicks) across a morphable low-rumble to crisp-transient timbre continuum.
-- **Real-Time Thread Safety**: Strictly zero memory allocations in the audio processing thread, lock-free parameter updates, and NaN/infinity defensive clamping.
+- **Real-Time Thread Safety**: Strictly zero memory allocations in the audio processing thread, lock-free parameter updates, and defensive clamping against invalid input.
 - **Sample-Accurate Automation**: VST3 parameter changes take effect at their exact sample offsets within the block.
 - **Backwards-Compatible State Preservation**: Versioned state serialisation (Version 4) seamlessly reading presets created in Versions 1, 2, and 3.
 
@@ -47,8 +49,8 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
                 v                                           v
        +-----------------+                         +-----------------+
        | Left Delay Line |                         | Right Delay Line|
-       |  (Fractional    |                         |  (Fractional    |
-       |   ITD Buffer)   |                         |   ITD Buffer)   |
+       | (4-Point Hermite|                         | (4-Point Hermite|
+       |   Cubic ITD)    |                         |   Cubic ITD)    |
        +--------+--------+                         +--------+--------+
                 |                                           |
                 v                                           v
@@ -67,8 +69,8 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
                 |                                           |
                 +---------------------+---------------------+
                                       |
-                                      +<----+ [Early Room Reflections]
-                                      |       (Floor, Walls, Ceiling)
+                                      +<----+ [3D Directional Early Reflections]
+                                      |       (Direction-Cosines & Diffuse DRR)
                                       v
                              [Soft-Knee Limiter]
                                       |
@@ -88,16 +90,22 @@ Positions are calculated using spherical coordinate conventions:
   $$v = \sin\phi \quad \text{(Vertical projection: } +1 = \text{overhead}, -1 = \text{below)}$$
 
 ### 2. Interaural Time Difference (ITD)
-Woodworth-Schlosser spherical head model with fractional-sample interpolation:
-$$\text{ITD}(s, d, \alpha) = \text{HRTF\_MAX\_ITD\_S} \cdot s \cdot \text{nf\_itd\_scale}(d) \cdot \alpha$$
+Calculated via Woodworth's spherical head acoustic ray-tracing model coupled with 4-point Hermite cubic fractional delay interpolation:
+$$\text{woodworth\_scale}(\theta) = \frac{\sin\theta_{\text{lat}} + \theta_{\text{lat}}}{1.0 + \frac{\pi}{2}}$$
+$$\text{ITD}(s, d, \alpha) = \text{HRTF\_MAX\_ITD\_S} \cdot \text{woodworth\_scale}(\theta) \cdot \text{nf\_itd\_scale}(d) \cdot \alpha$$
 where:
 - $\text{HRTF\_MAX\_ITD\_S} = 0.70\text{ ms}$ (reference cranial diameter).
-- $\text{nf\_itd\_scale}(d) = 1.0 + \frac{0.00765}{2 d^2 + 0.00765}$ accounts for spherical wavefront curvature increase at distances $d < 1\text{ m}$.
+- $\theta_{\text{lat}} = \arcsin(|s|)$ represents the lateral incident angle, eliminating the $\sim 0.12\text{ ms}$ over-estimate of sinusoidal models at intermediate angles ($30^\circ\text{--}60^\circ$).
+- 4-point Hermite cubic spline interpolation ensures a flat passband up to Nyquist without angle-dependent comb filtering on the far ear.
+- $\text{nf\_itd\_scale}(d) = 1.0 + \left(\frac{0.00765}{2 d^2 + 0.00765} - \text{offset}\right)$ accounts for spherical wavefront curvature increase at distances $d < 1\text{ m}$, continuous at $1\text{ m}$.
 - $\alpha \in [0.70, 1.30]$ is the anthropometric **Ear Scale** parameter.
 
-### 3. Interaural Level Difference (ILD) & Cranial Shadow
-At $90^\circ$ lateral ($s = \pm 1$), the contralateral ear is shadowed by $-8\text{ dB}$ ($\text{far\_gain} = 0.3981$). The ipsilateral and contralateral gains are normalised to preserve acoustic energy:
-$$g_L = 1 - s(1 - \text{far\_gain}), \quad g_R = 1, \quad \text{norm} = \sqrt{\frac{g_L^2 + g_R^2}{2}}$$
+### 3. Frequency-Dependent Interaural Level Difference (ILD)
+Head shadow models frequency-dependent diffraction around the cranial sphere:
+- **Low-Frequency Cranial Diffraction**: Sounds below $500\text{ Hz}$ bend around the skull with modest loss (broadband contralateral shadow of $-4.0\text{ dB}$, $\text{far\_gain} = 0.6310$).
+- **Contralateral High-Frequency Shadow**: The pinna/air high-shelf cascade introduces an additional $-9.0\text{ dB}$ attenuation on the far ear (totaling $-13.0\text{ dB}$ HF shadow), accurately matching measured human HRIRs.
+- Ipsilateral and contralateral gains are normalised to maintain acoustic energy balance:
+  $$g_L = 1 - s(1 - \text{far\_gain}), \quad g_R = 1, \quad \text{norm} = \sqrt{\frac{g_L^2 + g_R^2}{2}}$$
 
 ### 4. Anthropometric Pinna Spectral Cues
 Five cascading biquad filters in transposed direct-form II dynamically shape frequency content based on orientation and scale factor $\alpha$:
@@ -108,17 +116,19 @@ Five cascading biquad filters in transposed direct-form II dynamically shape fre
 - **Lateral Pinna Asymmetry**: Peaking filter at $2200\text{ Hz} / \alpha$, differentiating lateral positions from standard intensity panning.
 - **Near-Field Low-Frequency ILD Divergence (DVF)**: Low-shelf filter at $350\text{ Hz} / \alpha$ delivering up to $9.5\text{ dB}$ of low-frequency ILD divergence ($\pm 4.75\text{ dB}$ near/far ear shelving) for sources within $1\text{ metre}$.
 
-### 5. Room Boundary Early Reflection Engine
-A 50 ms circular buffer models early reflections from five boundary surfaces:
-- Floor ($4.8\text{ ms}$, gain $0.25$)
-- Ceiling ($8.1\text{ ms}$, gain $0.22$)
-- Left wall ($13.5\text{ ms}$, gain $0.20$)
-- Right wall ($16.2\text{ ms}$, gain $0.20$)
-- Back wall ($23.4\text{ ms}$, gain $0.16$)
-Reflections pass through a 1-pole high-frequency wall absorption filter ($35\%$ damping) before summing with the direct path, pulling the perceived acoustic image out of the listener's head.
+### 5. 3D Directional Room Boundaries & Distance-Dependent DRR
+A circular buffer models early reflections from five boundary surfaces:
+- Floor ($4.8\text{ ms}$, modulated by vertical projection $v$)
+- Ceiling ($8.1\text{ ms}$, modulated by vertical projection $v$)
+- Left wall ($13.5\text{ ms}$, modulated by lateral projection $s$)
+- Right wall ($16.2\text{ ms}$, modulated by lateral projection $s$)
+- Back wall ($23.4\text{ ms}$, modulated by front/rear projection $c$)
+
+Reflections exhibit acoustic ILD at the ears and pass through a 1-pole high-frequency wall absorption filter ($35\%$ damping). Rather than scaling with direct inverse distance, room reflections scale with a diffuse room factor $\frac{1}{\sqrt{1 + 0.15 d}}$, establishing a realistic Direct-to-Reverberant Ratio (DRR) gradient that serves as the primary acoustic distance cue.
 
 ### 6. Master Headroom & Soft-Knee Saturation
-- **Headroom Scaling**: Direct signal scaled by $0.7071$ ($-3.0\text{ dB}$) ensuring resonant pinna peaks never clip when input is at full scale.
+- **Headroom Scaling**: Direct signal scaled by $0.50$ ($-6.0\text{ dBFS}$), ensuring that $+6\text{ dB}$ pinna resonances on full-scale $0\text{ dBFS}$ inputs stay cleanly within linear headroom without driving the soft-limiter.
+- **Near-Field Proximity Gain**: Gentle proximity boost below $1\text{ m}$ (up to $+3\text{ dB}$ at $5\text{ cm}$) providing natural auditory intimacy.
 - **Tanh Soft-Knee Saturation**: Transparent soft knee engaging above $-1.0\text{ dBFS}$ ($0.89125$), guaranteeing peak output strictly never exceeds $0\text{ dBFS}$.
 
 ---
@@ -255,8 +265,8 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 
 ### 1. Prerequisites
 - **Operating System**: Windows 10 or 11 (64-bit).
-- **Compiler**: Visual Studio 2022 (Community, Professional, or Build Tools) with MSVC C/C++ x64 tools.
-- **Zero Python**: No Python interpreter or packages needed.
+- **Compiler**: Visual Studio 2022 (Community, Professional, or Build Tools) with MSVC C/C++ x64 tools (`cl.exe`).
+- **Native MSVC Toolchain**: Employs the MSVC C/C++ command-line compiler directly for all compilation, signal synthesis, and automated test execution.
 
 ### 2. Cloning the Repository
 ```cmd
@@ -295,7 +305,6 @@ g:\dev\hrtf\
 ├── install_ableton.bat             # UAC-elevating installer for Ableton Live
 ├── test_clap.c                     # Automated test harness for CLAP
 ├── test_vst3.cpp                   # Automated test harness for VST3
-├── pulsed_pink_noise_48k.wav       # Calibrated 24-bit 48 kHz test audio
 ├── tools/
 │   └── generate_test_pulse.c       # Pure C standalone CLI audio synthesiser
 ├── vst3/
@@ -306,7 +315,8 @@ g:\dev\hrtf\
 │   ├── plugcontroller.cpp          # VST3 parameters & state deserialisation
 │   ├── plugfactory.cpp             # VST3 plugin factory exports
 │   └── version.h                   # Plugin versioning metadata
-├── test_signals/                   # Reference audio directory
+├── test_signals/
+│   └── pulsed_pink_noise_48k.wav   # Reference 24-bit 48 kHz test audio
 ├── clap-src/                       # CLAP SDK headers (git submodule)
 ├── clap-wrapper/                   # CLAP wrapper utility (git submodule)
 ├── pluginterfaces/                 # Steinberg VST3 SDK interfaces (git submodule)
@@ -318,6 +328,6 @@ g:\dev\hrtf\
 ## Engineering Standards
 
 - **Strict British English**: All variable comments, user-facing parameter descriptions, docstrings, and documentation strictly use standard British English spellings (*spatialiser*, *externalisation*, *personalisation*, *customisable*, *metres*, *centre*, *colour*, *initialise*, *optimise*, *artefacts*).
-- **Strictly Zero Python**: All audio generation, test harnesses, build scripts, and CLI tools are written exclusively in pure C and C++.
+- **Pure Native C/C++ Toolchain**: All audio generation, automated verification suites, build automation, and CLI utilities are authored entirely in native C and C++.
 - **Deterministic Audio Output**: Bit-exact mathematical parity between the standalone CLI generator and the plugin's internal engine.
 - **Audio Thread Safety**: Zero heap allocations, zero system calls, zero mutexes or locks in any audio rendering callback.
