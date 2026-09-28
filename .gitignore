@@ -25,3 +25,17 @@
 *.suo
 Thumbs.db
 desktop.ini
+
+# ---------------------------------------------------------------
+# Python exclusion (Strict pure C project - no Python permitted)
+# ---------------------------------------------------------------
+*.py
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+env/

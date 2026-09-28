@@ -61,7 +61,7 @@ All parameters feature smooth exponential slewing (20–50 ms) inside [hrtf_core
 
 For critical acoustic verification, the repository includes psychoacoustically calibrated test signals:
 - `pulsed_pink_noise_48k.wav`: 48 kHz, 24-bit PCM mono loopable WAV (8 beats at 120 BPM). Each beat fires a 200 ms burst of $1/f$ pink noise with 5 ms Hann onsets and decays.
-- `tools/generate_test_pulse.py`: Standalone Python script to regenerate test WAV signals with custom duration, tempo, or sample rates.
+- `tools/generate_test_pulse.c`: Standalone pure C command-line tool (built and executed automatically by `build_all.bat`) linking against `hrtf_core.c` to synthesise test WAV signals with acoustic parity.
 - **Built-in Test Pulse Tick Box**: Available directly inside the VST3 and CLAP plugin as a dedicated toggle parameter. When enabled, it replaces the track input with the beat-synchronised pink noise pulse, allowing direct 3D positioning adjustments in Ableton Live without requiring external audio tracks.
 
 ---

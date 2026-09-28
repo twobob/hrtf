@@ -110,7 +110,23 @@ if !errorlevel! neq 0 (
 
 echo.
 echo ========================================================
-echo 4. Deploying to the system VST3 folder...
+echo 4. Building pure C test pulse generator tool...
+echo ========================================================
+
+cl.exe /nologo /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:build\generate_test_pulse.exe
+if !errorlevel! neq 0 (
+    echo ERROR: Failed to build generate_test_pulse.exe!
+    exit /b 1
+)
+build\generate_test_pulse.exe
+if !errorlevel! neq 0 (
+    echo ERROR: generate_test_pulse.exe reported failures!
+    exit /b 1
+)
+
+echo.
+echo ========================================================
+echo 5. Deploying to the system VST3 folder...
 echo ========================================================
 
 set TARGET_VST3_DIR=C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win
