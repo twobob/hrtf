@@ -39,46 +39,9 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
 
 ## Acoustic & DSP Foundations
 
-```
-                           +----------------------+
-                           |   Mono Source Input  |
-                           +----------+-----------+
-                                      |
-                +---------------------+---------------------+
-                |                                           |
-                v                                           v
-       +-----------------+                         +-----------------+
-       | Left Delay Line |                         | Right Delay Line|
-       | (4-Point Hermite|                         | (4-Point Hermite|
-       |   Cubic ITD)    |                         |   Cubic ITD)    |
-       +--------+--------+                         +--------+--------+
-                |                                           |
-                v                                           v
-       +-----------------+                         +-----------------+
-       | 5-Stage Biquad  |                         | 5-Stage Biquad  |
-       | Filter Cascade: |                         | Filter Cascade: |
-       | - Presence Peak |                         | - Presence Peak |
-       | - Concha Notch  |                         | - Concha Notch  |
-       | - Air High-Shelf|                         | - Air High-Shelf|
-       | - Side Peaking  |                         | - Side Peaking  |
-       | - Near-Field DVF|                         | - Near-Field DVF|
-       +--------+--------+                         +--------+--------+
-                |                                           |
-                v                                           v
-         [ILD Head Shadow]                           [ILD Head Shadow]
-                |                                           |
-                +---------------------+---------------------+
-                                      |
-                                      +<----+ [3D Directional Early Reflections]
-                                      |       (Direction-Cosines & Diffuse DRR)
-                                      v
-                             [Soft-Knee Limiter]
-                                      |
-                                      v
-                           +----------------------+
-                           | Binaural L / R Out   |
-                           +----------------------+
-```
+![Rotating HRTF DSP Signal Flow](img/hrtf2.png)
+
+![Typical Pinna Frequency Response: Front vs Back](img/hrtf.png)
 
 ### 1. Coordinate System & Direction Cosines
 Positions are calculated using spherical coordinate conventions:
@@ -316,6 +279,9 @@ hrtf/
 │   ├── plugcontroller.cpp          # VST3 parameters & state deserialisation
 │   ├── plugfactory.cpp             # VST3 plugin factory exports
 │   └── version.h                   # Plugin versioning metadata
+├── img/
+│   ├── hrtf.png                    # Typical pinna frequency response (front vs. back)
+│   └── hrtf2.png                   # 3D HRTF DSP signal flow diagram
 ├── test_signals/
 │   └── pulsed_pink_noise_48k.wav   # Reference 24-bit 48 kHz test audio
 ├── clap-src/                       # CLAP SDK headers (git submodule)
