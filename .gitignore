@@ -17,13 +17,6 @@
 *.vst3
 
 # ---------------------------------------------------------------
-# NTFS junction -> vst3_public_sdk submodule.
-# Ignored so the working tree is not traversed twice; it is
-# created per-machine with:  mklink /J public.sdk vst3_public_sdk
-# ---------------------------------------------------------------
-/public.sdk
-
-# ---------------------------------------------------------------
 # Editor / OS cruft
 # ---------------------------------------------------------------
 .vs/
