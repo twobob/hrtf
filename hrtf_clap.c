@@ -734,8 +734,7 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                     if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) &&
                         isfinite(process->transport->tempo) && process->transport->tempo > 1.0)
                         bpm = process->transport->tempo;
-                    if ((process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) &&
-                        isfinite((double)process->transport->song_pos_beats))
+                    if (process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
                         beat_pos = (double)process->transport->song_pos_beats / (double)CLAP_BEATTIME_FACTOR;
                     if (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)
                         is_playing = 1;

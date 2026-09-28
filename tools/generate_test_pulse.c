@@ -7,7 +7,9 @@
  * Standard format: 48 kHz, 24-bit PCM mono, loopable 8-beat pattern at 120 BPM (4.0 seconds).
  */
 
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,10 +44,11 @@ typedef struct {
 static int write_wav_file(const char *filename, const float *samples, size_t num_samples, uint32_t fs)
 {
     /* Ensure parent directory exists if specified in path */
-    const char *slash = strrchr(filename, '/');
-    if (!slash) slash = strrchr(filename, '\\');
+    const char *s1 = strrchr(filename, '/');
+    const char *s2 = strrchr(filename, '\\');
+    const char *slash = (s1 > s2) ? s1 : s2;
     if (slash) {
-        char dir[256];
+        char dir[1024];
         size_t len = (size_t)(slash - filename);
         if (len < sizeof(dir)) {
             memcpy(dir, filename, len);

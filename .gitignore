@@ -4,6 +4,7 @@
 /build/
 /bundle/
 /dist/
+!/dist/release_notes.md
 *.obj
 *.lib
 *.exp
@@ -17,6 +18,7 @@
 *.clap
 *.vst3
 /pulsed_pink_noise_48k.wav
+test_signals/*.wav
 
 # ---------------------------------------------------------------
 # Editor / OS cruft
