@@ -18,7 +18,7 @@ echo ========================================================
 echo 1. Building Rotating HRTF v2 CLAP Plugin...
 echo ========================================================
 
-cl.exe /nologo /W4 /LD /O2 /std:c11 /Iclap-src\include /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /nologo /W4 /WX /LD /O2 /std:c11 /Iclap-src\include /D_CRT_SECURE_NO_WARNINGS ^
     hrtf_core.c hrtf_clap.c ^
     /Fo:build\ /Fe:RotatingHRTF_v2.clap
 if !errorlevel! neq 0 (
@@ -65,7 +65,7 @@ set VST3_SOURCES=^
     base\source\updatehandler.cpp ^
     base\thread\source\flock.cpp
 
-cl.exe /nologo /W4 /wd4100 /wd4458 /wd4189 /wd4267 /LD /O2 /std:c++17 /EHsc /MD /I. /Ivst3 /DRELEASE=1 /D_CRT_SECURE_NO_WARNINGS ^
+cl.exe /nologo /W4 /WX /LD /O2 /std:c++17 /EHsc /MD /external:I . /external:W0 /Ivst3 /DRELEASE=1 /D_CRT_SECURE_NO_WARNINGS ^
     %VST3_SOURCES% ^
     /Fo:build\ ^
     /Fe:RotatingHRTF_v2.vst3 /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib ole32.lib
@@ -86,7 +86,7 @@ echo ========================================================
 echo 3. Building pure C test pulse generator tool and generating test audio...
 echo ========================================================
 
-cl.exe /nologo /W4 /D_CRT_SECURE_NO_WARNINGS /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:build\generate_test_pulse.exe
+cl.exe /nologo /W4 /WX /D_CRT_SECURE_NO_WARNINGS /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:build\generate_test_pulse.exe
 if !errorlevel! neq 0 (
     echo ERROR: Failed to build generate_test_pulse.exe!
     exit /b 1
@@ -102,7 +102,7 @@ echo ========================================================
 echo 4. Building and running automated tests (dogfooding generated test audio)...
 echo ========================================================
 
-cl.exe /nologo /W4 /wd4201 /D_CRT_SECURE_NO_WARNINGS /O2 /Iclap-src\include test_clap.c /Fo:build\ /Fe:test_clap.exe
+cl.exe /nologo /W4 /WX /wd4201 /D_CRT_SECURE_NO_WARNINGS /O2 /Iclap-src\include test_clap.c /Fo:build\ /Fe:test_clap.exe
 if !errorlevel! neq 0 (
     echo ERROR: Failed to build test_clap.exe!
     exit /b 1
@@ -113,7 +113,7 @@ if !errorlevel! neq 0 (
     exit /b 1
 )
 
-cl.exe /nologo /W4 /wd4100 /wd4458 /wd4189 /wd4267 /D_CRT_SECURE_NO_WARNINGS /O2 /std:c++17 /EHsc /MD /I. /Ivst3 /DRELEASE=1 test_vst3.cpp pluginterfaces\base\funknown.cpp public.sdk\source\vst\vstinitiids.cpp ole32.lib /Fo:build\ /Fe:test_vst3.exe
+cl.exe /nologo /W4 /WX /D_CRT_SECURE_NO_WARNINGS /O2 /std:c++17 /EHsc /MD /external:I . /external:W0 /Ivst3 /DRELEASE=1 test_vst3.cpp pluginterfaces\base\funknown.cpp pluginterfaces\base\coreiids.cpp public.sdk\source\vst\vstinitiids.cpp ole32.lib /Fo:build\ /Fe:test_vst3.exe
 if !errorlevel! neq 0 (
     echo ERROR: Failed to build test_vst3.exe!
     exit /b 1

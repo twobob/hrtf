@@ -115,9 +115,11 @@ public:
     Steinberg::int32 lastRestartFlags = 0;
     int restartCallCount = 0;
 
-    Steinberg::tresult PLUGIN_API queryInterface (const Steinberg::TUID iid, void** obj) override
+    Steinberg::tresult PLUGIN_API queryInterface (const Steinberg::TUID requestedIid, void** obj) override
     {
-        if (Steinberg::FUnknownPrivate::iidEqual (iid, Steinberg::Vst::IComponentHandler::iid))
+        if (!obj) return Steinberg::kInvalidArgument;
+        if (Steinberg::FUnknownPrivate::iidEqual (requestedIid, Steinberg::Vst::IComponentHandler::iid) ||
+            Steinberg::FUnknownPrivate::iidEqual (requestedIid, Steinberg::FUnknown::iid))
         {
             *obj = static_cast<Steinberg::Vst::IComponentHandler*>(this);
             return Steinberg::kResultOk;
@@ -333,7 +335,7 @@ int main()
             }
             else
             {
-                if (mockHandler.restartCallCount == 1 &&
+                if (mockHandler.restartCallCount >= 1 &&
                     (mockHandler.lastRestartFlags & Steinberg::Vst::kParamValuesChanged))
                 {
                     std::cout << "SUCCESS: controller->setComponentState dispatched restartComponent(kParamValuesChanged) via IComponentHandler.\n";
@@ -357,7 +359,7 @@ int main()
                     std::abs (pV - 1.00) < 1e-6 && std::abs (tV - 0.80) < 1e-6 &&
                     std::abs (esV - 0.65) < 1e-6)
                 {
-                    std::cout << "SUCCESS: controller->setComponentState restored all normalized parameter values accurately.\n";
+                    std::cout << "SUCCESS: controller->setComponentState restored all normalised parameter values accurately.\n";
                 }
                 else
                 {
@@ -366,27 +368,78 @@ int main()
                 }
             }
 
-            // Test hostile streams on controller->setComponentState
-            if (controller->setComponentState (nullptr) == Steinberg::kResultFalse)
+            // Test hostile streams on controller->setComponentState: null, truncated header, truncated payload, invalid version
+            // All hostile streams must be rejected (kResultFalse) AND leave all parameters untouched.
+            Steinberg::Vst::ParamValue ctrlBaseline[7];
+            for (int pIdx = 0; pIdx < 7; ++pIdx)
+                ctrlBaseline[pIdx] = controller->getParamNormalized (RotatingHrtf::kParamDistance + pIdx);
+
+            auto verifyCtrlUnchanged = [&](const char* testName) {
+                bool ok = true;
+                for (int pIdx = 0; pIdx < 7; ++pIdx)
+                {
+                    Steinberg::Vst::ParamValue cur = controller->getParamNormalized (RotatingHrtf::kParamDistance + pIdx);
+                    if (cur != ctrlBaseline[pIdx])
+                    {
+                        std::cerr << "ERROR: controller " << testName << " mutated parameter "
+                                  << (RotatingHrtf::kParamDistance + pIdx) << " from " << ctrlBaseline[pIdx]
+                                  << " to " << cur << "\n";
+                        ok = false;
+                    }
+                }
+                if (!ok) ++failures;
+                return ok;
+            };
+
+            if (controller->setComponentState (nullptr) == Steinberg::kResultFalse && verifyCtrlUnchanged ("setComponentState(nullptr)"))
             {
                 std::cout << "SUCCESS: controller->setComponentState(nullptr) rejected as expected.\n";
             }
             else
             {
-                std::cerr << "ERROR: controller->setComponentState(nullptr) was accepted!\n";
+                std::cerr << "ERROR: controller->setComponentState(nullptr) was accepted or mutated state!\n";
                 ++failures;
             }
 
-            TestMemStream ctrlTrunc;
-            ctrlTrunc.writeVal<Steinberg::int32> (42);
-            ctrlTrunc.cursor = 0;
-            if (controller->setComponentState (&ctrlTrunc) == Steinberg::kResultFalse)
+            TestMemStream ctrlTruncHdr;
+            ctrlTruncHdr.writeVal<Steinberg::int16> (4); // 2 bytes: incomplete version header
+            ctrlTruncHdr.cursor = 0;
+            if (controller->setComponentState (&ctrlTruncHdr) == Steinberg::kResultFalse && verifyCtrlUnchanged ("truncated header"))
             {
-                std::cout << "SUCCESS: controller->setComponentState rejected truncated stream.\n";
+                std::cout << "SUCCESS: controller->setComponentState rejected truncated header (2 bytes).\n";
             }
             else
             {
-                std::cerr << "ERROR: controller->setComponentState accepted truncated stream!\n";
+                std::cerr << "ERROR: controller->setComponentState accepted truncated header or mutated state!\n";
+                ++failures;
+            }
+
+            TestMemStream ctrlTruncPayload;
+            ctrlTruncPayload.writeVal<Steinberg::int32> (RotatingHrtf::kStateVersion);
+            ctrlTruncPayload.writeVal<double> (0.5);
+            ctrlTruncPayload.writeVal<double> (0.5); // only 2 doubles instead of 7
+            ctrlTruncPayload.cursor = 0;
+            if (controller->setComponentState (&ctrlTruncPayload) == Steinberg::kResultFalse && verifyCtrlUnchanged ("truncated payload"))
+            {
+                std::cout << "SUCCESS: controller->setComponentState rejected truncated payload (valid version + 2 doubles).\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: controller->setComponentState accepted truncated payload or mutated state!\n";
+                ++failures;
+            }
+
+            TestMemStream ctrlBadVer;
+            ctrlBadVer.writeVal<Steinberg::int32> (99); // bad version
+            for (int i = 0; i < 7; ++i) ctrlBadVer.writeVal<double> (0.5);
+            ctrlBadVer.cursor = 0;
+            if (controller->setComponentState (&ctrlBadVer) == Steinberg::kResultFalse && verifyCtrlUnchanged ("bad version"))
+            {
+                std::cout << "SUCCESS: controller->setComponentState rejected invalid version (99).\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: controller->setComponentState accepted invalid version or mutated state!\n";
                 ++failures;
             }
 
@@ -661,7 +714,7 @@ int main()
         {
             DummyChanges elevChanges;
             elevChanges.q.id = RotatingHrtf::kParamElevation;
-            elevChanges.q.val = 1.0; // normalized 1.0 = +90 deg
+            elevChanges.q.val = 1.0; // normalised 1.0 = +90 deg
 
             const int NE = 256;
             float el_l[NE] = {0}, el_r[NE] = {0}, el_in[NE];
@@ -963,27 +1016,58 @@ int main()
             }
         }
 
-        // Hostile state streams on comp->setState: null, truncated, bad version, incomplete payload
-        if (comp->setState (nullptr) == Steinberg::kResultFalse)
+        // Hostile state streams on comp->setState: null, truncated header, truncated payload, invalid version
+        // All hostile streams must be rejected (kResultFalse) AND leave processor state completely untouched.
+        TestMemStream procBaselineStream;
+        comp->getState (&procBaselineStream);
+
+        auto verifyProcUnchanged = [&](const char* testName) {
+            TestMemStream curStream;
+            comp->getState (&curStream);
+            if (curStream.buffer != procBaselineStream.buffer)
+            {
+                std::cerr << "ERROR: processor " << testName << " mutated state!\n";
+                ++failures;
+                return false;
+            }
+            return true;
+        };
+
+        if (comp->setState (nullptr) == Steinberg::kResultFalse && verifyProcUnchanged ("setState(nullptr)"))
         {
             std::cout << "SUCCESS: comp->setState(nullptr) rejected as expected.\n";
         }
         else
         {
-            std::cerr << "ERROR: comp->setState(nullptr) was accepted!\n";
+            std::cerr << "ERROR: comp->setState(nullptr) was accepted or mutated state!\n";
             ++failures;
         }
 
         TestMemStream truncStream;
-        truncStream.writeVal<Steinberg::int16> (42); // only 2 bytes
+        truncStream.writeVal<Steinberg::int16> (4); // only 2 bytes
         truncStream.cursor = 0;
-        if (comp->setState (&truncStream) == Steinberg::kResultFalse)
+        if (comp->setState (&truncStream) == Steinberg::kResultFalse && verifyProcUnchanged ("truncated header"))
         {
-            std::cout << "SUCCESS: comp->setState rejected truncated stream (2 bytes).\n";
+            std::cout << "SUCCESS: comp->setState rejected truncated header (2 bytes).\n";
         }
         else
         {
-            std::cerr << "ERROR: comp->setState accepted truncated stream!\n";
+            std::cerr << "ERROR: comp->setState accepted truncated header or mutated state!\n";
+            ++failures;
+        }
+
+        TestMemStream incStream;
+        incStream.writeVal<Steinberg::int32> (RotatingHrtf::kStateVersion);
+        incStream.writeVal<double> (0.5);
+        incStream.writeVal<double> (0.5); // only 2 doubles instead of 7
+        incStream.cursor = 0;
+        if (comp->setState (&incStream) == Steinberg::kResultFalse && verifyProcUnchanged ("incomplete payload"))
+        {
+            std::cout << "SUCCESS: comp->setState rejected incomplete parameter payload (valid version + 2 doubles).\n";
+        }
+        else
+        {
+            std::cerr << "ERROR: comp->setState accepted incomplete payload or mutated state!\n";
             ++failures;
         }
 
@@ -991,27 +1075,13 @@ int main()
         badVerStream.writeVal<Steinberg::int32> (99); // bad version
         for (int i = 0; i < 7; ++i) badVerStream.writeVal<double> (0.5);
         badVerStream.cursor = 0;
-        if (comp->setState (&badVerStream) == Steinberg::kResultFalse)
+        if (comp->setState (&badVerStream) == Steinberg::kResultFalse && verifyProcUnchanged ("invalid version"))
         {
             std::cout << "SUCCESS: comp->setState rejected invalid version (99).\n";
         }
         else
         {
-            std::cerr << "ERROR: comp->setState accepted invalid version!\n";
-            ++failures;
-        }
-
-        TestMemStream incStream;
-        incStream.writeVal<Steinberg::int32> (RotatingHrtf::kStateVersion);
-        incStream.writeVal<double> (0.5); // only 1 double instead of 7
-        incStream.cursor = 0;
-        if (comp->setState (&incStream) == Steinberg::kResultFalse)
-        {
-            std::cout << "SUCCESS: comp->setState rejected incomplete parameter payload.\n";
-        }
-        else
-        {
-            std::cerr << "ERROR: comp->setState accepted incomplete payload!\n";
+            std::cerr << "ERROR: comp->setState accepted invalid version or mutated state!\n";
             ++failures;
         }
     }
@@ -1095,6 +1165,12 @@ int main()
             mData.numOutputs = 1;
             mData.outputs = &mOutBus;
 
+            // Explicitly set rotation = 0.0 (front) rather than relying on default state
+            DummyChanges monoChanges;
+            monoChanges.q.id = RotatingHrtf::kParamRotation;
+            monoChanges.q.val = 0.0;
+            mData.inputParameterChanges = &monoChanges;
+
             Steinberg::tresult mr = p.processor->process (mData);
             double mono_sum_l = 0.0, mono_sum_r = 0.0;
             for (int i = 0; i < NM; ++i) {
@@ -1116,6 +1192,7 @@ int main()
     }
 
     // Mid-Session Sample Rate Change and Reactivation (setActive false -> setup 96k -> setActive true)
+    // Asserts rate-specific ITD arrival index at 96 kHz (142 samples vs 72 samples at 48 kHz).
     {
         Proc p = makeProcessor (factory);
         if (p.processor && p.comp)
@@ -1133,7 +1210,7 @@ int main()
 
             const int N96 = 512;
             float in96[N96], out96_l[N96] = {0}, out96_r[N96] = {0};
-            for (int i = 0; i < N96; ++i) in96[i] = sinf (2.0f * 3.14159265f * 1000.0f * (float)i / 96000.0f);
+            for (int i = 0; i < N96; ++i) in96[i] = 0.0f;
             float* in96Ptrs[2] = { in96, in96 };
             float* out96Ptrs[2] = { out96_l, out96_r };
             Steinberg::Vst::AudioBusBuffers inBus96 = {};
@@ -1147,21 +1224,55 @@ int main()
             data96.numInputs = 1; data96.inputs = &inBus96;
             data96.numOutputs = 1; data96.outputs = &outBus96;
 
+            // Set lateral 90 deg right, 5 cm near field, 130% ear scale, anechoic
+            DummyChanges changes96;
+            changes96.q.id = RotatingHrtf::kParamRotation; changes96.q.val = 0.25;
+            data96.inputParameterChanges = &changes96;
+            p.processor->process (data96);
+
+            changes96.q.id = RotatingHrtf::kParamDistance; changes96.q.val = 0.0; // 0.05m
+            data96.inputParameterChanges = &changes96;
+            p.processor->process (data96);
+
+            changes96.q.id = RotatingHrtf::kParamEarScale; changes96.q.val = 1.0; // 130%
+            data96.inputParameterChanges = &changes96;
+            p.processor->process (data96);
+
+            changes96.q.id = RotatingHrtf::kParamSpace; changes96.q.val = 0.0;
+            data96.inputParameterChanges = &changes96;
+            p.processor->process (data96);
+
+            data96.inputParameterChanges = nullptr;
+            for (int b = 0; b < 100; ++b) p.processor->process (data96);
+
+            // Feed unit impulse
+            in96[0] = 1.0f;
             Steinberg::tresult r96 = p.processor->process (data96);
-            double sum96 = 0.0;
-            bool finite96 = true;
-            for (int i = 0; i < N96; ++i) {
-                sum96 += std::abs (out96_l[i]) + std::abs (out96_r[i]);
-                if (!std::isfinite (out96_l[i]) || !std::isfinite (out96_r[i])) finite96 = false;
+
+            // Locate peak arrival in far ear (left)
+            int peak_idx_96 = 0;
+            float peak_val_96 = 0.0f;
+            for (int i = 0; i < N96; ++i)
+            {
+                if (std::abs (out96_l[i]) > peak_val_96)
+                {
+                    peak_val_96 = std::abs (out96_l[i]);
+                    peak_idx_96 = i;
+                }
             }
 
-            if (r96 == Steinberg::kResultOk && finite96 && sum96 > 0.1)
+            // At 96 kHz, Woodworth expected arrival = 0.00145685 * 96000 + 2.0 = 141.86 ~ 142 samples.
+            // At 48 kHz, it would be ~72 samples.
+            const int expected_arrival_96 = 142;
+            if (r96 == Steinberg::kResultOk && std::abs (peak_idx_96 - expected_arrival_96) <= 3)
             {
-                std::cout << "SUCCESS: Reactivation and mid-session sample rate change (96 kHz) processed successfully.\n";
+                std::cout << "SUCCESS: Reactivation and mid-session sample rate change (96 kHz) verified rate-specific ITD arrival (sample "
+                          << peak_idx_96 << ", expected 142 +/- 3; 48 kHz would be 72).\n";
             }
             else
             {
-                std::cerr << "ERROR: Mid-session sample rate change failed (r=" << r96 << ", finite=" << finite96 << ", sum=" << sum96 << ")\n";
+                std::cerr << "ERROR: Mid-session sample rate change failed rate-specific test (r=" << r96
+                          << ", arrival sample=" << peak_idx_96 << ", expected 142 +/- 3)\n";
                 ++failures;
             }
         }
