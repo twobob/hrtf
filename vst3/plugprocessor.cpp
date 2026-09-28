@@ -143,7 +143,10 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
     Steinberg::Vst::AudioBusBuffers& inBus = data.inputs[0];
     Steinberg::Vst::AudioBusBuffers& outBus = data.outputs[0];
 
-    if (outBus.numChannels < 2)
+    /* A host may supply null buffers for an inactive bus, so the pointers
+       are validated as well as the channel counts. */
+    if (outBus.numChannels < 2 || !outBus.channelBuffers32 ||
+        !outBus.channelBuffers32[0] || !outBus.channelBuffers32[1])
         return Steinberg::kResultOk;
 
     Steinberg::uint32 numSamples = (Steinberg::uint32)data.numSamples;
@@ -152,14 +155,16 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 
     float* mono = mMonoBuffer.data ();
 
-    if (inBus.numChannels >= 2 && inBus.channelBuffers32[0] && inBus.channelBuffers32[1])
+    if (inBus.channelBuffers32 && inBus.numChannels >= 2 &&
+        inBus.channelBuffers32[0] && inBus.channelBuffers32[1])
     {
         const float* inL = inBus.channelBuffers32[0];
         const float* inR = inBus.channelBuffers32[1];
         for (Steinberg::uint32 i = 0; i < numSamples; ++i)
             mono[i] = 0.5f * (inL[i] + inR[i]);
     }
-    else if (inBus.numChannels >= 1 && inBus.channelBuffers32[0])
+    else if (inBus.channelBuffers32 && inBus.numChannels >= 1 &&
+             inBus.channelBuffers32[0])
     {
         const float* inL = inBus.channelBuffers32[0];
         std::copy (inL, inL + numSamples, mono);
@@ -171,6 +176,10 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 
     float* outStereo[2] = { outBus.channelBuffers32[0], outBus.channelBuffers32[1] };
     hrtf_process (mCore, mono, outStereo, numSamples);
+
+    /* The whole block was written, so the output is not silent. A stale
+       "silent" flag left set makes hosts skip mixing real audio. */
+    outBus.silenceFlags = 0;
 
     return Steinberg::kResultOk;
 }
