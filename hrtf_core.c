@@ -4,9 +4,13 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
+
 #define HRTF_PI 3.141592653589793238462643383279502884
 #define HRTF_MAX_ITD_S 0.00070
-#define HRTF_MAX_DELAY_SAMPLES 512
 
 typedef struct {
     double b0,b1,b2,a1,a2;
@@ -257,14 +261,13 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     biquad_lowshelf(&r[4], h->fs, f_nf, nf_gain_r);
 }
 
-HrtfCore *hrtf_create(double sample_rate, size_t max_block)
+HrtfCore *hrtf_create(double sample_rate)
 {
-    if (!(sample_rate > 1000.0) || max_block == 0) return NULL;
+    if (!(sample_rate > 1000.0)) return NULL;
 
     HrtfCore *h = (HrtfCore *)calloc(1, sizeof(*h));
     if (!h) return NULL;
 
-    (void)max_block;
     h->fs = sample_rate;
     h->distance_m = h->distance_smooth = 2.0;
     h->phase = h->phase_smooth = 0.0;
@@ -273,10 +276,9 @@ HrtfCore *hrtf_create(double sample_rate, size_t max_block)
     h->ear_scale = h->ear_scale_smooth = 1.0; /* 100% standard anthropometric scale */
 
     /* Ensure delay line is sized to accommodate maximum near-field ITD (~1.46 ms)
-       with margin at any sample rate up to 192 kHz. */
+       with margin at any sample rate up to 192 kHz and beyond. */
     size_t needed = (size_t)ceil(sample_rate * 0.0020) + 32;
     if (needed < 16) needed = 16;
-    if (needed > HRTF_MAX_DELAY_SAMPLES) needed = HRTF_MAX_DELAY_SAMPLES;
     h->delay_size = needed;
 
     h->delay_l = (float *)calloc(h->delay_size, sizeof(float));
@@ -376,6 +378,11 @@ static inline float soft_limit(float x)
 void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 {
     if (!h || !mono || !stereo || !stereo[0] || !stereo[1]) return;
+
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    const unsigned int old_mxcsr = _mm_getcsr();
+    _mm_setcsr(old_mxcsr | 0x8040); /* Enable FTZ (bit 15) and DAZ (bit 6) */
+#endif
 
     /* Belt and braces: once a non-finite value reaches the filter state the
        output never recovers, so re-seed the smoothers if that ever happens. */
@@ -565,10 +572,13 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             if (h->early_pos >= h->early_size) h->early_pos = 0;
         }
 
-        /* Master headroom scale (0.35 = -9.1 dBFS):
-           With +6 dB pinna presence boost, peak gain is +6.0 dB - 9.1 dB = -3.1 dBFS,
-           ensuring resonance peaks do not overdrive the soft-limiter (threshold -1 dBFS) on 0 dBFS inputs. */
-        const double master_headroom = 0.35;
+        /* Master headroom scale (0.24 = -12.4 dBFS):
+           Scales the combined direct sound and early reflection mix.
+           Even under worst-case proximity boost (d = 0.05m, +2.88 dB distance gain,
+           +7.4 dB near presence) combined with 100% room reflections, worst-case peak
+           amplitude remains strictly below the -1.0 dBFS soft-limiter threshold (0.89125)
+           on full-scale 0 dBFS inputs, ensuring the waveshaper remains transparently idle. */
+        const double master_headroom = 0.24;
         const double space_gain = h->space_smooth * 0.40;
 
         /* Distance-dependent Direct-to-Reverberant Ratio (DRR):
@@ -578,8 +588,8 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
            primary physical acoustic cue for indoor auditory distance perception. */
         const double room_dist_factor = 1.0 / sqrt(1.0 + 0.15 * d);
 
-        float out0 = (float)(yl * gl * distance_gain * master_headroom + h->early_lpf_l * space_gain * room_dist_factor);
-        float out1 = (float)(yr * gr * distance_gain * master_headroom + h->early_lpf_r * space_gain * room_dist_factor);
+        float out0 = (float)((yl * gl * distance_gain + h->early_lpf_l * space_gain * room_dist_factor) * master_headroom);
+        float out1 = (float)((yr * gr * distance_gain + h->early_lpf_r * space_gain * room_dist_factor) * master_headroom);
 
         /* Soft-knee saturation ceiling: guarantees peak amplitude never exceeds 0 dBFS */
         stereo[0][i] = soft_limit(out0);
@@ -588,6 +598,10 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         h->delay_pos++;
         if (h->delay_pos >= h->delay_size) h->delay_pos = 0;
     }
+
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    _mm_setcsr(old_mxcsr);
+#endif
 }
 
 /* -------------------------------------------------------------------------

@@ -15,7 +15,7 @@ typedef struct HrtfCore HrtfCore;
    rotation_phase: 0..1, periodic; 0=front, .25=right, .5=back, .75=left.
    elevation_deg: degrees, -90..+90; -90=below, 0=horizontal, +90=overhead.
    space_01: room externalisation, 0..1; 0=anechoic dry, 1=maximum room reflections. */
-HrtfCore *hrtf_create(double sample_rate, size_t max_block);
+HrtfCore *hrtf_create(double sample_rate);
 void hrtf_destroy(HrtfCore *h);
 void hrtf_reset(HrtfCore *h);
 void hrtf_set_distance(HrtfCore *h, double distance_m);
