@@ -109,6 +109,36 @@ public:
     Steinberg::Vst::IParamValueQueue* PLUGIN_API addParameterData (const Steinberg::Vst::ParamID&, Steinberg::int32&) override { return &q; }
 };
 
+class MockComponentHandler : public Steinberg::Vst::IComponentHandler
+{
+public:
+    Steinberg::int32 lastRestartFlags = 0;
+    int restartCallCount = 0;
+
+    Steinberg::tresult PLUGIN_API queryInterface (const Steinberg::TUID iid, void** obj) override
+    {
+        if (Steinberg::FUnknownPrivate::iidEqual (iid, Steinberg::Vst::IComponentHandler::iid))
+        {
+            *obj = static_cast<Steinberg::Vst::IComponentHandler*>(this);
+            return Steinberg::kResultOk;
+        }
+        *obj = nullptr;
+        return Steinberg::kNoInterface;
+    }
+    Steinberg::uint32 PLUGIN_API addRef () override { return 1; }
+    Steinberg::uint32 PLUGIN_API release () override { return 1; }
+
+    Steinberg::tresult PLUGIN_API beginEdit (Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API performEdit (Steinberg::Vst::ParamID, Steinberg::Vst::ParamValue) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API endEdit (Steinberg::Vst::ParamID) override { return Steinberg::kResultOk; }
+    Steinberg::tresult PLUGIN_API restartComponent (Steinberg::int32 flags) override
+    {
+        lastRestartFlags = flags;
+        restartCallCount++;
+        return Steinberg::kResultOk;
+    }
+};
+
 typedef bool (*InitDllFunc)();
 typedef bool (*ExitDllFunc)();
 typedef Steinberg::IPluginFactory* (*GetPluginFactoryFunc)();
@@ -278,6 +308,91 @@ int main()
             controller->getParameterInfo(p, pInfo);
             std::wcout << L"    Param " << p << L": ID=" << pInfo.id << L", Title=" << (wchar_t*)pInfo.title << L", Units=" << (wchar_t*)pInfo.units << L"\n";
         }
+
+        // Test Controller setComponentState, parameter restoration, and restartComponent dispatch
+        {
+            MockComponentHandler mockHandler;
+            controller->setComponentHandler (&mockHandler);
+
+            TestMemStream ctrlStream;
+            ctrlStream.writeVal<Steinberg::int32> (RotatingHrtf::kStateVersion);
+            ctrlStream.writeVal<double> (0.75); // Distance (norm)
+            ctrlStream.writeVal<double> (0.33); // Rotation
+            ctrlStream.writeVal<double> (0.60); // Elevation
+            ctrlStream.writeVal<double> (0.45); // Space
+            ctrlStream.writeVal<double> (1.00); // Test Pulse
+            ctrlStream.writeVal<double> (0.80); // Test Tone
+            ctrlStream.writeVal<double> (0.65); // Ear Scale
+            ctrlStream.cursor = 0;
+
+            Steinberg::tresult cRes = controller->setComponentState (&ctrlStream);
+            if (cRes != Steinberg::kResultOk)
+            {
+                std::cerr << "ERROR: controller->setComponentState failed on valid stream\n";
+                ++failures;
+            }
+            else
+            {
+                if (mockHandler.restartCallCount == 1 &&
+                    (mockHandler.lastRestartFlags & Steinberg::Vst::kParamValuesChanged))
+                {
+                    std::cout << "SUCCESS: controller->setComponentState dispatched restartComponent(kParamValuesChanged) via IComponentHandler.\n";
+                }
+                else
+                {
+                    std::cerr << "ERROR: restartComponent was not dispatched correctly (calls=" << mockHandler.restartCallCount << ", flags=" << mockHandler.lastRestartFlags << ")\n";
+                    ++failures;
+                }
+
+                Steinberg::Vst::ParamValue dV = controller->getParamNormalized (RotatingHrtf::kParamDistance);
+                Steinberg::Vst::ParamValue rV = controller->getParamNormalized (RotatingHrtf::kParamRotation);
+                Steinberg::Vst::ParamValue eV = controller->getParamNormalized (RotatingHrtf::kParamElevation);
+                Steinberg::Vst::ParamValue sV = controller->getParamNormalized (RotatingHrtf::kParamSpace);
+                Steinberg::Vst::ParamValue pV = controller->getParamNormalized (RotatingHrtf::kParamTestPulse);
+                Steinberg::Vst::ParamValue tV = controller->getParamNormalized (RotatingHrtf::kParamTestTone);
+                Steinberg::Vst::ParamValue esV = controller->getParamNormalized (RotatingHrtf::kParamEarScale);
+
+                if (std::abs (dV - 0.75) < 1e-6 && std::abs (rV - 0.33) < 1e-6 &&
+                    std::abs (eV - 0.60) < 1e-6 && std::abs (sV - 0.45) < 1e-6 &&
+                    std::abs (pV - 1.00) < 1e-6 && std::abs (tV - 0.80) < 1e-6 &&
+                    std::abs (esV - 0.65) < 1e-6)
+                {
+                    std::cout << "SUCCESS: controller->setComponentState restored all normalized parameter values accurately.\n";
+                }
+                else
+                {
+                    std::cerr << "ERROR: controller parameter values mismatch after setComponentState\n";
+                    ++failures;
+                }
+            }
+
+            // Test hostile streams on controller->setComponentState
+            if (controller->setComponentState (nullptr) == Steinberg::kResultFalse)
+            {
+                std::cout << "SUCCESS: controller->setComponentState(nullptr) rejected as expected.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: controller->setComponentState(nullptr) was accepted!\n";
+                ++failures;
+            }
+
+            TestMemStream ctrlTrunc;
+            ctrlTrunc.writeVal<Steinberg::int32> (42);
+            ctrlTrunc.cursor = 0;
+            if (controller->setComponentState (&ctrlTrunc) == Steinberg::kResultFalse)
+            {
+                std::cout << "SUCCESS: controller->setComponentState rejected truncated stream.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: controller->setComponentState accepted truncated stream!\n";
+                ++failures;
+            }
+
+            controller->setComponentHandler (nullptr);
+        }
+
         controller->terminate();
         controller->release();
     }
@@ -499,20 +614,20 @@ int main()
 
             float* inPtrs[2] = { big_in, big_in };
             float* outPtrs[2] = { big_l, big_r };
-            Steinberg::Vst::AudioBusBuffers inBus = {};
-            inBus.numChannels = 2;
-            inBus.channelBuffers32 = inPtrs;
-            Steinberg::Vst::AudioBusBuffers outBus = {};
-            outBus.numChannels = 2;
-            outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::AudioBusBuffers bigInBus = {};
+            bigInBus.numChannels = 2;
+            bigInBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers bigOutBus = {};
+            bigOutBus.numChannels = 2;
+            bigOutBus.channelBuffers32 = outPtrs;
             Steinberg::Vst::ProcessData data = {};
             data.processMode = Steinberg::Vst::kRealtime;
             data.symbolicSampleSize = Steinberg::Vst::kSample32;
             data.numSamples = NB;
             data.numInputs = 1;
-            data.inputs = &inBus;
+            data.inputs = &bigInBus;
             data.numOutputs = 1;
-            data.outputs = &outBus;
+            data.outputs = &bigOutBus;
 
             const Steinberg::tresult r = p.processor->process (data);
 
@@ -553,16 +668,16 @@ int main()
             for (int i = 0; i < NE; ++i) el_in[i] = sinf (2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
             float* inPtrs[2] = { el_in, el_in };
             float* outPtrs[2] = { el_l, el_r };
-            Steinberg::Vst::AudioBusBuffers inBus = {};
-            inBus.numChannels = 2; inBus.channelBuffers32 = inPtrs;
-            Steinberg::Vst::AudioBusBuffers outBus = {};
-            outBus.numChannels = 2; outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::AudioBusBuffers elInBus = {};
+            elInBus.numChannels = 2; elInBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers elOutBus = {};
+            elOutBus.numChannels = 2; elOutBus.channelBuffers32 = outPtrs;
             Steinberg::Vst::ProcessData data = {};
             data.processMode = Steinberg::Vst::kRealtime;
             data.symbolicSampleSize = Steinberg::Vst::kSample32;
             data.numSamples = NE;
-            data.numInputs = 1; data.inputs = &inBus;
-            data.numOutputs = 1; data.outputs = &outBus;
+            data.numInputs = 1; data.inputs = &elInBus;
+            data.numOutputs = 1; data.outputs = &elOutBus;
             data.inputParameterChanges = &elevChanges;
 
             p.processor->process (data);
@@ -596,16 +711,16 @@ int main()
 
             float* inPtrs[2] = { zero_in, zero_in };
             float* outPtrs[2] = { pulse_l, pulse_r };
-            Steinberg::Vst::AudioBusBuffers inBus = {};
-            inBus.numChannels = 2; inBus.channelBuffers32 = inPtrs;
-            Steinberg::Vst::AudioBusBuffers outBus = {};
-            outBus.numChannels = 2; outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::AudioBusBuffers pulseInBus = {};
+            pulseInBus.numChannels = 2; pulseInBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers pulseOutBus = {};
+            pulseOutBus.numChannels = 2; pulseOutBus.channelBuffers32 = outPtrs;
             Steinberg::Vst::ProcessData data = {};
             data.processMode = Steinberg::Vst::kRealtime;
             data.symbolicSampleSize = Steinberg::Vst::kSample32;
             data.numSamples = NP;
-            data.numInputs = 1; data.inputs = &inBus;
-            data.numOutputs = 1; data.outputs = &outBus;
+            data.numInputs = 1; data.inputs = &pulseInBus;
+            data.numOutputs = 1; data.outputs = &pulseOutBus;
 
             DummyChanges pulseChanges;
             pulseChanges.q.id = RotatingHrtf::kParamTestPulse;
@@ -806,8 +921,8 @@ int main()
     if (comp)
     {
         TestMemStream saveStream;
-        Steinberg::tresult res = comp->getState(&saveStream);
-        if (res != Steinberg::kResultOk || saveStream.buffer.size() != 60)
+        Steinberg::tresult saveRes = comp->getState(&saveStream);
+        if (saveRes != Steinberg::kResultOk || saveStream.buffer.size() != 60)
         {
             std::cerr << "ERROR: comp->getState() failed or returned unexpected byte count (" << saveStream.buffer.size() << ", expected 60)\n";
             ++failures;
@@ -826,8 +941,8 @@ int main()
 
             // Restore original state
             saveStream.cursor = 0;
-            res = comp->setState(&saveStream);
-            if (res != Steinberg::kResultOk)
+            saveRes = comp->setState(&saveStream);
+            if (saveRes != Steinberg::kResultOk)
             {
                 std::cerr << "ERROR: comp->setState() failed on valid state stream\n";
                 ++failures;
@@ -847,6 +962,210 @@ int main()
                 }
             }
         }
+
+        // Hostile state streams on comp->setState: null, truncated, bad version, incomplete payload
+        if (comp->setState (nullptr) == Steinberg::kResultFalse)
+        {
+            std::cout << "SUCCESS: comp->setState(nullptr) rejected as expected.\n";
+        }
+        else
+        {
+            std::cerr << "ERROR: comp->setState(nullptr) was accepted!\n";
+            ++failures;
+        }
+
+        TestMemStream truncStream;
+        truncStream.writeVal<Steinberg::int16> (42); // only 2 bytes
+        truncStream.cursor = 0;
+        if (comp->setState (&truncStream) == Steinberg::kResultFalse)
+        {
+            std::cout << "SUCCESS: comp->setState rejected truncated stream (2 bytes).\n";
+        }
+        else
+        {
+            std::cerr << "ERROR: comp->setState accepted truncated stream!\n";
+            ++failures;
+        }
+
+        TestMemStream badVerStream;
+        badVerStream.writeVal<Steinberg::int32> (99); // bad version
+        for (int i = 0; i < 7; ++i) badVerStream.writeVal<double> (0.5);
+        badVerStream.cursor = 0;
+        if (comp->setState (&badVerStream) == Steinberg::kResultFalse)
+        {
+            std::cout << "SUCCESS: comp->setState rejected invalid version (99).\n";
+        }
+        else
+        {
+            std::cerr << "ERROR: comp->setState accepted invalid version!\n";
+            ++failures;
+        }
+
+        TestMemStream incStream;
+        incStream.writeVal<Steinberg::int32> (RotatingHrtf::kStateVersion);
+        incStream.writeVal<double> (0.5); // only 1 double instead of 7
+        incStream.cursor = 0;
+        if (comp->setState (&incStream) == Steinberg::kResultFalse)
+        {
+            std::cout << "SUCCESS: comp->setState rejected incomplete parameter payload.\n";
+        }
+        else
+        {
+            std::cerr << "ERROR: comp->setState accepted incomplete payload!\n";
+            ++failures;
+        }
+    }
+
+    // Bus Arrangements: Mono In -> Stereo Out accepted, Stereo In -> Stereo Out accepted, 5.1 In rejected, Mono Out rejected
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor)
+        {
+            Steinberg::Vst::SpeakerArrangement inArrMono = Steinberg::Vst::SpeakerArr::kMono;
+            Steinberg::Vst::SpeakerArrangement outArrStereo = Steinberg::Vst::SpeakerArr::kStereo;
+            Steinberg::tresult r1 = p.processor->setBusArrangements (&inArrMono, 1, &outArrStereo, 1);
+
+            Steinberg::Vst::SpeakerArrangement inArrStereo = Steinberg::Vst::SpeakerArr::kStereo;
+            Steinberg::tresult r2 = p.processor->setBusArrangements (&inArrStereo, 1, &outArrStereo, 1);
+
+            Steinberg::Vst::SpeakerArrangement inArr51 = Steinberg::Vst::SpeakerArr::k51;
+            Steinberg::tresult r3 = p.processor->setBusArrangements (&inArr51, 1, &outArrStereo, 1);
+
+            Steinberg::Vst::SpeakerArrangement outArrMono = Steinberg::Vst::SpeakerArr::kMono;
+            Steinberg::tresult r4 = p.processor->setBusArrangements (&inArrStereo, 1, &outArrMono, 1);
+
+            if (r1 == Steinberg::kResultTrue && r2 == Steinberg::kResultTrue &&
+                r3 == Steinberg::kResultFalse && r4 == Steinberg::kResultFalse)
+            {
+                std::cout << "SUCCESS: Bus arrangements properly accepted (Mono/Stereo In -> Stereo Out) and rejected (5.1 In, Mono Out).\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: Bus arrangement validation failed (r1=" << r1 << ", r2=" << r2 << ", r3=" << r3 << ", r4=" << r4 << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p);
+    }
+
+    // Sample Size Rejection: kSample32 accepted, kSample64 rejected
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor)
+        {
+            Steinberg::tresult r32 = p.processor->canProcessSampleSize (Steinberg::Vst::kSample32);
+            Steinberg::tresult r64 = p.processor->canProcessSampleSize (Steinberg::Vst::kSample64);
+            if (r32 == Steinberg::kResultTrue && r64 == Steinberg::kResultFalse)
+            {
+                std::cout << "SUCCESS: canProcessSampleSize correctly accepted kSample32 and rejected kSample64.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: canProcessSampleSize failed (r32=" << r32 << ", r64=" << r64 << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p);
+    }
+
+    // Mono Input Processing: 1 channel input produces symmetric binaural stereo output
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor)
+        {
+            const int NM = 256;
+            float mono_in[NM];
+            float mono_out_l[NM] = {0}, mono_out_r[NM] = {0};
+            for (int i = 0; i < NM; ++i) mono_in[i] = sinf (2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
+
+            float* monoInPtrs[1] = { mono_in };
+            float* monoOutPtrs[2] = { mono_out_l, mono_out_r };
+            Steinberg::Vst::AudioBusBuffers mInBus = {};
+            mInBus.numChannels = 1;
+            mInBus.channelBuffers32 = monoInPtrs;
+            Steinberg::Vst::AudioBusBuffers mOutBus = {};
+            mOutBus.numChannels = 2;
+            mOutBus.channelBuffers32 = monoOutPtrs;
+            Steinberg::Vst::ProcessData mData = {};
+            mData.processMode = Steinberg::Vst::kRealtime;
+            mData.symbolicSampleSize = Steinberg::Vst::kSample32;
+            mData.numSamples = NM;
+            mData.numInputs = 1;
+            mData.inputs = &mInBus;
+            mData.numOutputs = 1;
+            mData.outputs = &mOutBus;
+
+            Steinberg::tresult mr = p.processor->process (mData);
+            double mono_sum_l = 0.0, mono_sum_r = 0.0;
+            for (int i = 0; i < NM; ++i) {
+                mono_sum_l += std::abs (mono_out_l[i]);
+                mono_sum_r += std::abs (mono_out_r[i]);
+            }
+
+            if (mr == Steinberg::kResultOk && mono_sum_l > 0.01 && std::abs (mono_sum_l - mono_sum_r) < 1e-4)
+            {
+                std::cout << "SUCCESS: Mono input bus correctly processed into symmetric binaural stereo output.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: Mono input processing failed (mr=" << mr << ", L=" << mono_sum_l << ", R=" << mono_sum_r << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p);
+    }
+
+    // Mid-Session Sample Rate Change and Reactivation (setActive false -> setup 96k -> setActive true)
+    {
+        Proc p = makeProcessor (factory);
+        if (p.processor && p.comp)
+        {
+            p.comp->setActive (false);
+
+            Steinberg::Vst::ProcessSetup setup96k = {};
+            setup96k.processMode = Steinberg::Vst::kRealtime;
+            setup96k.symbolicSampleSize = Steinberg::Vst::kSample32;
+            setup96k.maxSamplesPerBlock = 512;
+            setup96k.sampleRate = 96000.0;
+            p.processor->setupProcessing (setup96k);
+
+            p.comp->setActive (true);
+
+            const int N96 = 512;
+            float in96[N96], out96_l[N96] = {0}, out96_r[N96] = {0};
+            for (int i = 0; i < N96; ++i) in96[i] = sinf (2.0f * 3.14159265f * 1000.0f * (float)i / 96000.0f);
+            float* in96Ptrs[2] = { in96, in96 };
+            float* out96Ptrs[2] = { out96_l, out96_r };
+            Steinberg::Vst::AudioBusBuffers inBus96 = {};
+            inBus96.numChannels = 2; inBus96.channelBuffers32 = in96Ptrs;
+            Steinberg::Vst::AudioBusBuffers outBus96 = {};
+            outBus96.numChannels = 2; outBus96.channelBuffers32 = out96Ptrs;
+            Steinberg::Vst::ProcessData data96 = {};
+            data96.processMode = Steinberg::Vst::kRealtime;
+            data96.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data96.numSamples = N96;
+            data96.numInputs = 1; data96.inputs = &inBus96;
+            data96.numOutputs = 1; data96.outputs = &outBus96;
+
+            Steinberg::tresult r96 = p.processor->process (data96);
+            double sum96 = 0.0;
+            bool finite96 = true;
+            for (int i = 0; i < N96; ++i) {
+                sum96 += std::abs (out96_l[i]) + std::abs (out96_r[i]);
+                if (!std::isfinite (out96_l[i]) || !std::isfinite (out96_r[i])) finite96 = false;
+            }
+
+            if (r96 == Steinberg::kResultOk && finite96 && sum96 > 0.1)
+            {
+                std::cout << "SUCCESS: Reactivation and mid-session sample rate change (96 kHz) processed successfully.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: Mid-session sample rate change failed (r=" << r96 << ", finite=" << finite96 << ", sum=" << sum96 << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p);
     }
 
     if (comp)

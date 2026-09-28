@@ -533,6 +533,66 @@ int main(void) {
                 printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
 
+            /* Hostile state stream tests: reject bad magic, invalid version, truncated streams, incomplete payload */
+            {
+                /* 1. Bad magic: "NOPE" */
+                MemStream bad_magic;
+                memset(&bad_magic, 0, sizeof(bad_magic));
+                memcpy(bad_magic.data, "NOPE", 4);
+                uint32_t v = 4;
+                memcpy(bad_magic.data + 4, &v, sizeof(v));
+                bad_magic.size = 64;
+                clap_istream_t is_bm = { &bad_magic, mem_read };
+                if (state->load(plugin, &is_bm)) {
+                    printf("ERROR: state->load() accepted stream with invalid magic 'NOPE'\n");
+                    ++failures;
+                }
+
+                /* 2. Invalid version: "HRTF" with version 99 */
+                MemStream bad_ver;
+                memset(&bad_ver, 0, sizeof(bad_ver));
+                memcpy(bad_ver.data, "HRTF", 4);
+                uint32_t bad_v = 99;
+                memcpy(bad_ver.data + 4, &bad_v, sizeof(bad_v));
+                bad_ver.size = 64;
+                clap_istream_t is_bv = { &bad_ver, mem_read };
+                if (state->load(plugin, &is_bv)) {
+                    printf("ERROR: state->load() accepted stream with invalid version 99\n");
+                    ++failures;
+                }
+
+                /* 3. Truncated header: only 3 bytes */
+                MemStream trunc_hdr;
+                memset(&trunc_hdr, 0, sizeof(trunc_hdr));
+                memcpy(trunc_hdr.data, "HRT", 3);
+                trunc_hdr.size = 3;
+                clap_istream_t is_th = { &trunc_hdr, mem_read };
+                if (state->load(plugin, &is_th)) {
+                    printf("ERROR: state->load() accepted truncated 3-byte header\n");
+                    ++failures;
+                }
+
+                /* 4. Incomplete parameter payload: 8-byte header + only 32 bytes (expected 56 bytes) */
+                MemStream trunc_payload;
+                memset(&trunc_payload, 0, sizeof(trunc_payload));
+                memcpy(trunc_payload.data, "HRTF", 4);
+                memcpy(trunc_payload.data + 4, &v, sizeof(v));
+                trunc_payload.size = 40; /* 8 + 32 */
+                clap_istream_t is_tp = { &trunc_payload, mem_read };
+                if (state->load(plugin, &is_tp)) {
+                    printf("ERROR: state->load() accepted incomplete parameter payload\n");
+                    ++failures;
+                }
+
+                /* 5. Null stream */
+                if (state->load(plugin, NULL)) {
+                    printf("ERROR: state->load() accepted NULL stream\n");
+                    ++failures;
+                }
+
+                printf("SUCCESS: Hostile state streams rejected (bad magic, invalid version, truncated header/payload, NULL stream).\n");
+            }
+
             /* Test near-field ITD delay without aliasing: d = 5 cm, ear_scale = 1.30, 90 deg right */
             {
                 flush_param(plugin, params, 1, 0.05); /* 5 cm distance */
@@ -698,7 +758,173 @@ int main(void) {
                        rumble_deltas, crisp_deltas);
                 ++failures;
             }
+
+            /* Worst-case limiter transparency test:
+               0 dBFS 3.9 kHz sine + extreme near-field (d = 0.05 m, +2.88 dB distance gain,
+               +7.4 dB pinna presence) + 100% room reflections (space = 1.0).
+               Asserts that worst-case peak stays strictly below -1.0 dBFS (0.89125),
+               keeping the soft-knee saturator transparently idle. */
+            {
+                flush_param(plugin, params, 1, 0.05); /* 5 cm distance */
+                flush_param(plugin, params, 2, 0.0);  /* 0 deg rotation (front) */
+                flush_param(plugin, params, 3, 0.0);  /* 0 deg elevation */
+                flush_param(plugin, params, 4, 1.0);  /* 100% space (reflections) */
+                flush_param(plugin, params, 5, 0.0);  /* internal test pulse OFF */
+                flush_param(plugin, params, 7, 1.0);  /* 100% ear scale */
+
+                /* Settle smoothers */
+                for (uint32_t i = 0; i < N; ++i) in_buf[i] = 0.0f;
+                for (int b = 0; b < 20; ++b) plugin->process(plugin, &process);
+
+                /* Generate full-scale 0 dBFS 3.9 kHz sine wave over 100 blocks */
+                float max_peak = 0.0f;
+                double phase_acc = 0.0;
+                const double phase_inc = 2.0 * 3.14159265358979323846 * 3900.0 / 48000.0;
+                for (int b = 0; b < 100; ++b) {
+                    for (uint32_t i = 0; i < N; ++i) {
+                        in_buf[i] = (float)sin(phase_acc);
+                        phase_acc += phase_inc;
+                        if (phase_acc >= 2.0 * 3.14159265358979323846)
+                            phase_acc -= 2.0 * 3.14159265358979323846;
+                    }
+                    plugin->process(plugin, &process);
+                    for (uint32_t i = 0; i < N; ++i) {
+                        float al = fabsf(out_l[i]);
+                        float ar = fabsf(out_r[i]);
+                        if (al > max_peak) max_peak = al;
+                        if (ar > max_peak) max_peak = ar;
+                    }
+                }
+
+                const float kLimiterThreshold = 0.89125f; /* -1.0 dBFS */
+                if (max_peak < kLimiterThreshold) {
+                    printf("SUCCESS: Worst-case limiter transparency verified (peak=%f < threshold 0.89125 [-1.0 dBFS], limiter idle).\n",
+                           max_peak);
+                } else {
+                    printf("ERROR: Output peak (%f) engaged soft-limiter threshold (%f) under worst-case input!\n",
+                           max_peak, kLimiterThreshold);
+                    ++failures;
+                }
+            }
         }
+    }
+
+    /* Multi-sample-rate operation: 44.1, 48, 88.2, 96, 192 kHz.
+       Tests delay buffer sizing, Nyquist clamps, ITD scaling, and median-plane bit symmetry. */
+    {
+        const double test_rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+        const size_t num_rates = sizeof(test_rates) / sizeof(test_rates[0]);
+        const uint32_t multi_N = 1024;
+        float *multi_in = (float *)calloc(multi_N, sizeof(float));
+        float *multi_l  = (float *)calloc(multi_N, sizeof(float));
+        float *multi_r  = (float *)calloc(multi_N, sizeof(float));
+        float *multi_in_ptrs[1] = { multi_in };
+        float *multi_out_ptrs[2] = { multi_l, multi_r };
+
+        clap_audio_buffer_t multi_in_audio;
+        multi_in_audio.data32 = multi_in_ptrs;
+        multi_in_audio.channel_count = 1;
+        multi_in_audio.latency = 0;
+        multi_in_audio.constant_mask = 0;
+
+        clap_audio_buffer_t multi_out_audio;
+        multi_out_audio.data32 = multi_out_ptrs;
+        multi_out_audio.channel_count = 2;
+        multi_out_audio.latency = 0;
+        multi_out_audio.constant_mask = 0;
+
+        clap_process_t multi_proc;
+        memset(&multi_proc, 0, sizeof(multi_proc));
+        multi_proc.steady_time = 0;
+        multi_proc.frames_count = multi_N;
+        multi_proc.transport = NULL;
+        multi_proc.audio_inputs = &multi_in_audio;
+        multi_proc.audio_inputs_count = 1;
+        multi_proc.audio_outputs = &multi_out_audio;
+        multi_proc.audio_outputs_count = 1;
+        multi_proc.in_events = NULL;
+        multi_proc.out_events = NULL;
+
+        for (size_t r = 0; r < num_rates; ++r) {
+            double sr = test_rates[r];
+            plugin->deactivate(plugin);
+            if (!plugin->activate(plugin, sr, 32, multi_N)) {
+                printf("ERROR: plugin->activate() failed at %0.1f Hz\n", sr);
+                ++failures;
+                continue;
+            }
+
+            /* Test 1: Near-field maximum ITD delay scaling at this sample rate */
+            flush_param(plugin, params, 1, 0.05); /* 5 cm */
+            flush_param(plugin, params, 2, 0.25); /* 90 deg right */
+            flush_param(plugin, params, 3, 0.0);
+            flush_param(plugin, params, 4, 0.0);
+            flush_param(plugin, params, 5, 0.0);
+            flush_param(plugin, params, 7, 1.30); /* 130% ear scale */
+
+            /* Settle smoothers */
+            for (uint32_t i = 0; i < multi_N; ++i) multi_in[i] = 0.0f;
+            for (int b = 0; b < 40; ++b) plugin->process(plugin, &multi_proc);
+
+            /* Unit impulse */
+            multi_in[0] = 1.0f;
+            plugin->process(plugin, &multi_proc);
+
+            /* Check filter stability */
+            int stable = 1;
+            for (uint32_t i = 0; i < multi_N; ++i) {
+                if (!isfinite(multi_l[i]) || !isfinite(multi_r[i])) {
+                    stable = 0;
+                    break;
+                }
+            }
+            if (!stable) {
+                printf("ERROR: Non-finite output detected at %0.1f Hz (filter instability)\n", sr);
+                ++failures;
+            }
+
+            /* Find peak arrival in far ear (left) */
+            uint32_t peak_idx = 0;
+            float peak_val = 0.0f;
+            for (uint32_t i = 0; i < multi_N; ++i) {
+                if (fabsf(multi_l[i]) > peak_val) {
+                    peak_val = fabsf(multi_l[i]);
+                    peak_idx = i;
+                }
+            }
+
+            /* Expected arrival: ~0.0013125 * sr (within [0.00115 * sr, 0.00155 * sr]) */
+            uint32_t min_exp = (uint32_t)(0.00115 * sr);
+            uint32_t max_exp = (uint32_t)(0.00155 * sr);
+            if (peak_idx >= min_exp && peak_idx <= max_exp) {
+                printf("SUCCESS: ITD delay scales accurately at %0.1f Hz (arrival sample %u, expected [%u, %u]).\n",
+                       sr, peak_idx, min_exp, max_exp);
+            } else {
+                printf("ERROR: ITD delay mismatch at %0.1f Hz! Peak at sample %u, expected [%u, %u]\n",
+                       sr, peak_idx, min_exp, max_exp);
+                ++failures;
+            }
+
+            /* Test 2: Median-plane bit-identical symmetry at this sample rate */
+            flush_param(plugin, params, 2, 0.0); /* front (s = 0) */
+            plugin->reset(plugin);
+            for (uint32_t i = 0; i < multi_N; ++i) multi_in[i] = 0.0f;
+            for (int b = 0; b < 20; ++b) plugin->process(plugin, &multi_proc);
+
+            multi_in[0] = 1.0f;
+            plugin->process(plugin, &multi_proc);
+
+            if (memcmp(multi_l, multi_r, multi_N * sizeof(float)) == 0) {
+                printf("SUCCESS: Bit-identical median-plane symmetry verified at %0.1f Hz.\n", sr);
+            } else {
+                printf("ERROR: Median plane bit symmetry broken at %0.1f Hz!\n", sr);
+                ++failures;
+            }
+        }
+
+        free(multi_in);
+        free(multi_l);
+        free(multi_r);
     }
 
     plugin->deactivate(plugin);
