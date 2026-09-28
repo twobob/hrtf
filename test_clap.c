@@ -148,6 +148,37 @@ static int load_test_wav(const char *filename, float *buffer, size_t max_samples
     return samples_read > 0 ? 1 : 0;
 }
 
+static int g_host_rescan_called = 0;
+static clap_param_rescan_flags g_host_last_rescan_flags = 0;
+
+static void CLAP_ABI dummy_rescan(const clap_host_t *host, clap_param_rescan_flags flags) {
+    (void)host;
+    g_host_rescan_called++;
+    g_host_last_rescan_flags = flags;
+}
+
+static void CLAP_ABI dummy_clear(const clap_host_t *host, clap_id param_id, clap_param_clear_flags flags) {
+    (void)host; (void)param_id; (void)flags;
+}
+
+static void CLAP_ABI dummy_request_flush(const clap_host_t *host) {
+    (void)host;
+}
+
+static const clap_host_params_t dummy_host_params = {
+    .rescan = dummy_rescan,
+    .clear = dummy_clear,
+    .request_flush = dummy_request_flush
+};
+
+static const void * CLAP_ABI dummy_get_ext(const clap_host_t *host, const char *extension_id) {
+    (void)host;
+    if (extension_id && strcmp(extension_id, CLAP_EXT_PARAMS) == 0) {
+        return &dummy_host_params;
+    }
+    return NULL;
+}
+
 int main(void) {
     /* Fail the build without popping up a crash dialog if this harness
        ever faults: the exit code is what the build script reads. */
@@ -203,7 +234,7 @@ int main(void) {
         .vendor = "Tester",
         .url = "",
         .version = "1.0",
-        .get_extension = NULL,
+        .get_extension = dummy_get_ext,
         .request_restart = NULL,
         .request_process = NULL,
         .request_callback = NULL
@@ -485,10 +516,17 @@ int main(void) {
             flush_param(plugin, params, 6, 0.5);
             flush_param(plugin, params, 7, 1.0);
 
+            g_host_rescan_called = 0;
             mem.pos = 0;
             if (!state->load(plugin, &is)) {
                 printf("ERROR: state load failed\n");
                 ++failures;
+            }
+            if (g_host_rescan_called < 1 || !(g_host_last_rescan_flags & CLAP_PARAM_RESCAN_VALUES)) {
+                printf("ERROR: state->load() did not notify host via clap_host_params.rescan(CLAP_PARAM_RESCAN_VALUES)\n");
+                ++failures;
+            } else {
+                printf("SUCCESS: state->load() dispatched rescan(CLAP_PARAM_RESCAN_VALUES) to host.\n");
             }
 
             double d = 0.0, r = 0.0, e = 0.0, s = 0.0, p_val = 0.0, t_val = 0.0, es_val = 0.0;
@@ -533,8 +571,32 @@ int main(void) {
                 printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
 
-            /* Hostile state stream tests: reject bad magic, invalid version, truncated streams, incomplete payload */
+            /* Hostile state stream tests: reject bad magic, invalid version, truncated header/payload, NULL stream */
             {
+                int hostile_failures = 0;
+                double baseline_vals[7];
+                for (uint32_t pi = 1; pi <= 7; ++pi) {
+                    params->get_value(plugin, pi, &baseline_vals[pi - 1]);
+                }
+
+                #define ASSERT_HOSTILE_REJECTED(stream_ptr, test_desc) do { \
+                    if (state->load(plugin, (stream_ptr))) { \
+                        printf("ERROR: state->load() accepted " test_desc "\n"); \
+                        ++hostile_failures; \
+                        ++failures; \
+                    } \
+                    for (uint32_t pi = 1; pi <= 7; ++pi) { \
+                        double cur_v = 0.0; \
+                        params->get_value(plugin, pi, &cur_v); \
+                        if (cur_v != baseline_vals[pi - 1]) { \
+                            printf("ERROR: " test_desc " mutated parameter %u (was %f, now %f)\n", \
+                                   pi, baseline_vals[pi - 1], cur_v); \
+                            ++hostile_failures; \
+                            ++failures; \
+                        } \
+                    } \
+                } while (0)
+
                 /* 1. Bad magic: "NOPE" */
                 MemStream bad_magic;
                 memset(&bad_magic, 0, sizeof(bad_magic));
@@ -543,10 +605,7 @@ int main(void) {
                 memcpy(bad_magic.data + 4, &v, sizeof(v));
                 bad_magic.size = 64;
                 clap_istream_t is_bm = { &bad_magic, mem_read };
-                if (state->load(plugin, &is_bm)) {
-                    printf("ERROR: state->load() accepted stream with invalid magic 'NOPE'\n");
-                    ++failures;
-                }
+                ASSERT_HOSTILE_REJECTED(&is_bm, "stream with invalid magic 'NOPE'");
 
                 /* 2. Invalid version: "HRTF" with version 99 */
                 MemStream bad_ver;
@@ -556,41 +615,43 @@ int main(void) {
                 memcpy(bad_ver.data + 4, &bad_v, sizeof(bad_v));
                 bad_ver.size = 64;
                 clap_istream_t is_bv = { &bad_ver, mem_read };
-                if (state->load(plugin, &is_bv)) {
-                    printf("ERROR: state->load() accepted stream with invalid version 99\n");
-                    ++failures;
-                }
+                ASSERT_HOSTILE_REJECTED(&is_bv, "stream with invalid version 99");
 
-                /* 3. Truncated header: only 3 bytes */
+                /* 3. Truncated version read: 4 bytes magic "HRTF" + 2 bytes version */
+                MemStream trunc_ver;
+                memset(&trunc_ver, 0, sizeof(trunc_ver));
+                memcpy(trunc_ver.data, "HRTF", 4);
+                uint16_t short_v = 4;
+                memcpy(trunc_ver.data + 4, &short_v, sizeof(short_v));
+                trunc_ver.size = 6;
+                clap_istream_t is_tv = { &trunc_ver, mem_read };
+                ASSERT_HOSTILE_REJECTED(&is_tv, "stream with truncated version (6 bytes)");
+
+                /* 4. Truncated header: only 3 bytes */
                 MemStream trunc_hdr;
                 memset(&trunc_hdr, 0, sizeof(trunc_hdr));
                 memcpy(trunc_hdr.data, "HRT", 3);
                 trunc_hdr.size = 3;
                 clap_istream_t is_th = { &trunc_hdr, mem_read };
-                if (state->load(plugin, &is_th)) {
-                    printf("ERROR: state->load() accepted truncated 3-byte header\n");
-                    ++failures;
-                }
+                ASSERT_HOSTILE_REJECTED(&is_th, "truncated 3-byte header");
 
-                /* 4. Incomplete parameter payload: 8-byte header + only 32 bytes (expected 56 bytes) */
+                /* 5. Incomplete parameter payload: 8-byte valid header + only 16 bytes (2 doubles instead of 7) */
                 MemStream trunc_payload;
                 memset(&trunc_payload, 0, sizeof(trunc_payload));
                 memcpy(trunc_payload.data, "HRTF", 4);
                 memcpy(trunc_payload.data + 4, &v, sizeof(v));
-                trunc_payload.size = 40; /* 8 + 32 */
+                trunc_payload.size = 24; /* 8 + 16 */
                 clap_istream_t is_tp = { &trunc_payload, mem_read };
-                if (state->load(plugin, &is_tp)) {
-                    printf("ERROR: state->load() accepted incomplete parameter payload\n");
-                    ++failures;
-                }
+                ASSERT_HOSTILE_REJECTED(&is_tp, "incomplete parameter payload (24 bytes)");
 
-                /* 5. Null stream */
-                if (state->load(plugin, NULL)) {
-                    printf("ERROR: state->load() accepted NULL stream\n");
-                    ++failures;
-                }
+                /* 6. Null stream */
+                ASSERT_HOSTILE_REJECTED(NULL, "NULL stream");
 
-                printf("SUCCESS: Hostile state streams rejected (bad magic, invalid version, truncated header/payload, NULL stream).\n");
+                #undef ASSERT_HOSTILE_REJECTED
+
+                if (hostile_failures == 0) {
+                    printf("SUCCESS: Hostile state streams rejected without mutating parameters (bad magic, invalid version, truncated header/payload, NULL stream).\n");
+                }
             }
 
             /* Test near-field ITD delay without aliasing: d = 5 cm, ear_scale = 1.30, 90 deg right */
@@ -759,11 +820,9 @@ int main(void) {
                 ++failures;
             }
 
-            /* Worst-case limiter transparency test:
-               0 dBFS 3.9 kHz sine + extreme near-field (d = 0.05 m, +2.88 dB distance gain,
-               +7.4 dB pinna presence) + 100% room reflections (space = 1.0).
-               Asserts that worst-case peak stays strictly below -1.0 dBFS (0.89125),
-               keeping the soft-knee saturator transparently idle. */
+            /* Worst-case limiter transparency and active compression tests:
+               Worst-case geometry: d = 0.05 m (+2.88 dB distance gain, +7.4 dB pinna presence)
+               + 100% room reflections (space = 1.0). */
             {
                 flush_param(plugin, params, 1, 0.05); /* 5 cm distance */
                 flush_param(plugin, params, 2, 0.0);  /* 0 deg rotation (front) */
@@ -772,52 +831,119 @@ int main(void) {
                 flush_param(plugin, params, 5, 0.0);  /* internal test pulse OFF */
                 flush_param(plugin, params, 7, 1.0);  /* 100% ear scale */
 
+                const float kLimiterKnee = 0.89125f; /* -1.0 dBFS */
+
                 /* Settle smoothers */
                 for (uint32_t i = 0; i < N; ++i) in_buf[i] = 0.0f;
                 for (int b = 0; b < 20; ++b) plugin->process(plugin, &process);
 
-                /* Generate full-scale 0 dBFS 3.9 kHz sine wave over 100 blocks */
-                float max_peak = 0.0f;
-                double phase_acc = 0.0;
-                const double phase_inc = 2.0 * 3.14159265358979323846 * 3900.0 / 48000.0;
-                for (int b = 0; b < 100; ++b) {
+                /* Frequency sweep of full-scale 0 dBFS sine waves:
+                   1000 Hz, 2500 Hz, 3900 Hz, 3973 Hz (settled) plus a cold-start transient probe */
+                const double sweep_freqs[] = { 1000.0, 2500.0, 3900.0, 3973.0 };
+                const size_t num_sweep_freqs = sizeof(sweep_freqs) / sizeof(sweep_freqs[0]);
+                float sweep_max_peak = 0.0f;
+
+                for (size_t f = 0; f < num_sweep_freqs; ++f) {
+                    double freq = sweep_freqs[f];
+                    double phase_acc = 0.0;
+                    const double phase_inc = 2.0 * 3.14159265358979323846 * freq / 48000.0;
+                    for (int b = 0; b < 50; ++b) {
+                        for (uint32_t i = 0; i < N; ++i) {
+                            in_buf[i] = (float)sin(phase_acc);
+                            phase_acc += phase_inc;
+                            if (phase_acc >= 2.0 * 3.14159265358979323846)
+                                phase_acc -= 2.0 * 3.14159265358979323846;
+                        }
+                        plugin->process(plugin, &process);
+                        for (uint32_t i = 0; i < N; ++i) {
+                            float al = fabsf(out_l[i]);
+                            float ar = fabsf(out_r[i]);
+                            if (al > sweep_max_peak) sweep_max_peak = al;
+                            if (ar > sweep_max_peak) sweep_max_peak = ar;
+                        }
+                    }
+                }
+
+                /* Cold-start transient probe: clear history with reset, then immediately feed full-scale 3973 Hz */
+                plugin->reset(plugin);
+                {
+                    double phase_acc = 0.0;
+                    const double phase_inc = 2.0 * 3.14159265358979323846 * 3973.0 / 48000.0;
+                    for (int b = 0; b < 10; ++b) {
+                        for (uint32_t i = 0; i < N; ++i) {
+                            in_buf[i] = (float)sin(phase_acc);
+                            phase_acc += phase_inc;
+                            if (phase_acc >= 2.0 * 3.14159265358979323846)
+                                phase_acc -= 2.0 * 3.14159265358979323846;
+                        }
+                        plugin->process(plugin, &process);
+                        for (uint32_t i = 0; i < N; ++i) {
+                            float al = fabsf(out_l[i]);
+                            float ar = fabsf(out_r[i]);
+                            if (al > sweep_max_peak) sweep_max_peak = al;
+                            if (ar > sweep_max_peak) sweep_max_peak = ar;
+                        }
+                    }
+                }
+
+                if (sweep_max_peak < kLimiterKnee) {
+                    float margin_pct = (1.0f - sweep_max_peak / kLimiterKnee) * 100.0f;
+                    printf("SUCCESS: Worst-case limiter transparency verified (peak=%f < knee 0.89125 [-1.0 dBFS], margin=%.1f%%, limiter idle).\n",
+                           sweep_max_peak, margin_pct);
+                } else {
+                    printf("ERROR: Output peak (%f) engaged soft-limiter knee (%f) under 0 dBFS input!\n",
+                           sweep_max_peak, kLimiterKnee);
+                    ++failures;
+                }
+
+                /* Active limiter exercise: drive with deliberately hot input (+6 dBFS, amplitude 2.0).
+                   Exercises soft_limit() waveshaper compression.
+                   Falsification check: If soft_limit(x) returned x, peak would be > 1.6! */
+                float hot_max_peak = 0.0f;
+                double hot_phase = 0.0;
+                const double hot_inc = 2.0 * 3.14159265358979323846 * 3973.0 / 48000.0;
+                for (int b = 0; b < 50; ++b) {
                     for (uint32_t i = 0; i < N; ++i) {
-                        in_buf[i] = (float)sin(phase_acc);
-                        phase_acc += phase_inc;
-                        if (phase_acc >= 2.0 * 3.14159265358979323846)
-                            phase_acc -= 2.0 * 3.14159265358979323846;
+                        in_buf[i] = 2.0f * (float)sin(hot_phase);
+                        hot_phase += hot_inc;
+                        if (hot_phase >= 2.0 * 3.14159265358979323846)
+                            hot_phase -= 2.0 * 3.14159265358979323846;
                     }
                     plugin->process(plugin, &process);
                     for (uint32_t i = 0; i < N; ++i) {
                         float al = fabsf(out_l[i]);
                         float ar = fabsf(out_r[i]);
-                        if (al > max_peak) max_peak = al;
-                        if (ar > max_peak) max_peak = ar;
+                        if (al > hot_max_peak) hot_max_peak = al;
+                        if (ar > hot_max_peak) hot_max_peak = ar;
                     }
                 }
 
-                const float kLimiterThreshold = 0.89125f; /* -1.0 dBFS */
-                if (max_peak < kLimiterThreshold) {
-                    printf("SUCCESS: Worst-case limiter transparency verified (peak=%f < threshold 0.89125 [-1.0 dBFS], limiter idle).\n",
-                           max_peak);
+                if (hot_max_peak > kLimiterKnee && hot_max_peak <= 1.000000f) {
+                    printf("SUCCESS: Active limiter exercise verified: hot +6 dBFS input drove waveshaper past knee (peak=%f > 0.89125) while strictly observing ceiling <= 1.000000.\n",
+                           hot_max_peak);
                 } else {
-                    printf("ERROR: Output peak (%f) engaged soft-limiter threshold (%f) under worst-case input!\n",
-                           max_peak, kLimiterThreshold);
+                    printf("ERROR: Active limiter failure on +6 dBFS input! Peak was %f (expected > 0.89125 and <= 1.000000)\n",
+                           hot_max_peak);
                     ++failures;
                 }
             }
         }
     }
 
-    /* Multi-sample-rate operation: 44.1, 48, 88.2, 96, 192 kHz.
-       Tests delay buffer sizing, Nyquist clamps, ITD scaling, and median-plane bit symmetry. */
+    /* Multi-sample-rate operation: 44.1, 48, 88.2, 96, 192, 384 kHz.
+       Tests delay buffer sizing (>512 samples at 384 kHz), Nyquist clamps, Woodworth ITD scaling, and median-plane bit symmetry. */
     {
-        const double test_rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0 };
+        const double test_rates[] = { 44100.0, 48000.0, 88200.0, 96000.0, 192000.0, 384000.0 };
         const size_t num_rates = sizeof(test_rates) / sizeof(test_rates[0]);
-        const uint32_t multi_N = 1024;
+        const uint32_t multi_N = 2048;
         float *multi_in = (float *)calloc(multi_N, sizeof(float));
         float *multi_l  = (float *)calloc(multi_N, sizeof(float));
         float *multi_r  = (float *)calloc(multi_N, sizeof(float));
+        if (!multi_in || !multi_l || !multi_r) {
+            printf("ERROR: Failed to allocate multi-rate test buffers\n");
+            free(multi_in); free(multi_l); free(multi_r);
+            return 1;
+        }
         float *multi_in_ptrs[1] = { multi_in };
         float *multi_out_ptrs[2] = { multi_l, multi_r };
 
@@ -864,11 +990,21 @@ int main(void) {
 
             /* Settle smoothers */
             for (uint32_t i = 0; i < multi_N; ++i) multi_in[i] = 0.0f;
-            for (int b = 0; b < 40; ++b) plugin->process(plugin, &multi_proc);
+            for (int b = 0; b < 40; ++b) {
+                clap_process_status ps = plugin->process(plugin, &multi_proc);
+                if (ps != CLAP_PROCESS_CONTINUE) {
+                    printf("ERROR: process() returned %d at %0.1f Hz\n", ps, sr);
+                    ++failures;
+                }
+            }
 
             /* Unit impulse */
             multi_in[0] = 1.0f;
-            plugin->process(plugin, &multi_proc);
+            clap_process_status ps = plugin->process(plugin, &multi_proc);
+            if (ps != CLAP_PROCESS_CONTINUE) {
+                printf("ERROR: process() returned %d on impulse at %0.1f Hz\n", ps, sr);
+                ++failures;
+            }
 
             /* Check filter stability */
             int stable = 1;
@@ -893,15 +1029,18 @@ int main(void) {
                 }
             }
 
-            /* Expected arrival: ~0.0013125 * sr (within [0.00115 * sr, 0.00155 * sr]) */
-            uint32_t min_exp = (uint32_t)(0.00115 * sr);
-            uint32_t max_exp = (uint32_t)(0.00155 * sr);
-            if (peak_idx >= min_exp && peak_idx <= max_exp) {
-                printf("SUCCESS: ITD delay scales accurately at %0.1f Hz (arrival sample %u, expected [%u, %u]).\n",
-                       sr, peak_idx, min_exp, max_exp);
+            /* Woodworth formula expected arrival:
+               ITD at 90 deg lateral, 5 cm near-field (nf_scale = 1.600933), 130% ear scale:
+               ITD_s = 0.00070 * 1.600933 * 1.30 = 0.00145685 s.
+               Arrival index = round(0.00145685 * sr + 2.0). */
+            double expected_samples = 0.00145685 * sr + 2.0;
+            uint32_t exp_arrival = (uint32_t)round(expected_samples);
+            if (peak_idx >= exp_arrival - 3 && peak_idx <= exp_arrival + 3) {
+                printf("SUCCESS: ITD delay scales accurately at %0.1f Hz (arrival sample %u, expected %u +/- 3).\n",
+                       sr, peak_idx, exp_arrival);
             } else {
-                printf("ERROR: ITD delay mismatch at %0.1f Hz! Peak at sample %u, expected [%u, %u]\n",
-                       sr, peak_idx, min_exp, max_exp);
+                printf("ERROR: ITD delay mismatch at %0.1f Hz! Peak at sample %u, expected %u +/- 3\n",
+                       sr, peak_idx, exp_arrival);
                 ++failures;
             }
 
