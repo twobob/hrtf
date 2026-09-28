@@ -1,0 +1,15 @@
+[submodule "base"]
+	path = base
+	url = https://github.com/steinbergmedia/vst3_base.git
+[submodule "clap-src"]
+	path = clap-src
+	url = https://github.com/free-audio/clap.git
+[submodule "clap-wrapper"]
+	path = clap-wrapper
+	url = https://github.com/free-audio/clap-wrapper.git
+[submodule "pluginterfaces"]
+	path = pluginterfaces
+	url = https://github.com/steinbergmedia/vst3_pluginterfaces.git
+[submodule "vst3_public_sdk"]
+	path = vst3_public_sdk
+	url = https://github.com/steinbergmedia/vst3_public_sdk.git
