@@ -13,6 +13,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#ifdef _WIN32
+#include <direct.h>
+#else
+#include <sys/stat.h>
+#endif
 
 #include "../hrtf_core.h"
 
@@ -36,6 +41,23 @@ typedef struct {
 
 static int write_wav_file(const char *filename, const float *samples, size_t num_samples, uint32_t fs)
 {
+    /* Ensure parent directory exists if specified in path */
+    const char *slash = strrchr(filename, '/');
+    if (!slash) slash = strrchr(filename, '\\');
+    if (slash) {
+        char dir[256];
+        size_t len = (size_t)(slash - filename);
+        if (len < sizeof(dir)) {
+            memcpy(dir, filename, len);
+            dir[len] = '\0';
+#ifdef _WIN32
+            _mkdir(dir);
+#else
+            mkdir(dir, 0755);
+#endif
+        }
+    }
+
     FILE *f = fopen(filename, "wb");
     if (!f) {
         fprintf(stderr, "ERROR: Unable to open file for writing: %s\n", filename);
@@ -66,10 +88,21 @@ static int write_wav_file(const char *filename, const float *samples, size_t num
         return 0;
     }
 
+    /* Check for peak amplitude to scale cleanly if necessary (preventing any hard clipping) */
+    double peak = 0.0;
+    for (size_t i = 0; i < num_samples; ++i) {
+        double a = fabs((double)samples[i]);
+        if (a > peak) peak = a;
+    }
+    double norm_factor = 1.0;
+    if (peak > 0.999) {
+        norm_factor = 0.95 / peak;
+    }
+
     const double scale = 8388607.0; /* 2^23 - 1 */
 
     for (size_t i = 0; i < num_samples; ++i) {
-        double s = samples[i];
+        double s = (double)samples[i] * norm_factor;
         if (s > 0.999999) s = 0.999999;
         if (s < -0.999999) s = -0.999999;
 

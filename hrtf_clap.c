@@ -1,5 +1,7 @@
 
+#ifndef _CRT_SECURE_NO_WARNINGS
 #define _CRT_SECURE_NO_WARNINGS
+#endif
 #include <clap/clap.h>
 #include <clap/ext/audio-ports.h>
 #include <clap/ext/params.h>
@@ -397,6 +399,17 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
     (void)plugin;
     if (!text || !out_value) return false;
 
+    if (param_id == PARAM_TEST_PULSE) {
+        if (_stricmp(text, "on") == 0 || strcmp(text, "1") == 0 || _stricmp(text, "true") == 0) {
+            *out_value = 1.0;
+            return true;
+        }
+        if (_stricmp(text, "off") == 0 || strcmp(text, "0") == 0 || _stricmp(text, "false") == 0) {
+            *out_value = 0.0;
+            return true;
+        }
+    }
+
     char *end = NULL;
     errno = 0;
     double v = strtod(text, &end);
@@ -408,6 +421,7 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
 
     if (param_id == PARAM_DISTANCE) {
         if (*end == 'm' || *end == 'M') ++end;
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
         if (v < 0.05 || v > 20.0) return false;
         *out_value = v;
@@ -420,6 +434,7 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
                 if (end[2] == 'g' || end[2] == 'G') end += 3;
             }
         }
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
 
         /* Text without degrees is interpreted as phase [0,1]. */
@@ -438,6 +453,7 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
                 if (end[2] == 'g' || end[2] == 'G') end += 3;
             }
         }
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
         if (v < -90.0 || v > 90.0) return false;
         *out_value = v;
@@ -445,40 +461,40 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
     }
 
     if (param_id == PARAM_SPACE) {
-        if (*end == '%') ++end;
+        bool has_pct = false;
+        if (*end == '%') { has_pct = true; ++end; }
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
-        if (v > 1.0) v /= 100.0;
+        if (has_pct || v > 1.0) v /= 100.0;
         if (v < 0.0 || v > 1.0) return false;
         *out_value = v;
         return true;
     }
 
     if (param_id == PARAM_TEST_PULSE) {
-        if (_stricmp(text, "on") == 0 || strcmp(text, "1") == 0) {
-            *out_value = 1.0;
-            return true;
-        }
-        if (_stricmp(text, "off") == 0 || strcmp(text, "0") == 0) {
-            *out_value = 0.0;
-            return true;
-        }
+        while (*end == ' ' || *end == '\t') ++end;
+        if (*end != '\0') return false;
         *out_value = (v >= 0.5) ? 1.0 : 0.0;
         return true;
     }
 
     if (param_id == PARAM_TEST_TONE) {
-        if (*end == '%') ++end;
+        bool has_pct = false;
+        if (*end == '%') { has_pct = true; ++end; }
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
-        if (v > 1.0) v /= 100.0;
+        if (has_pct || v > 1.0) v /= 100.0;
         if (v < 0.0 || v > 1.0) return false;
         *out_value = v;
         return true;
     }
 
     if (param_id == PARAM_EAR_SCALE) {
-        if (*end == '%') ++end;
+        bool has_pct = false;
+        if (*end == '%') { has_pct = true; ++end; }
+        while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
-        if (v > 10.0) v /= 100.0;
+        if (has_pct || v > 10.0) v /= 100.0;
         if (v < 0.70 || v > 1.30) return false;
         *out_value = v;
         return true;
@@ -755,7 +771,7 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     const bool input_active =
         in && in->data32 && in->channel_count >= 1 && in->data32[0];
 
-    if (!input_active && process->frames_count > p->silence_frames)
+    if (process->frames_count > p->silence_frames)
         return CLAP_PROCESS_ERROR; /* host broke the max_frames_count contract */
 
     const float *src = input_active ? in->data32[0] : p->silence;
@@ -795,9 +811,11 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                 double beat_pos = 0.0;
                 int is_playing = 0;
                 if (process->transport) {
-                    if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && process->transport->tempo > 1.0)
+                    if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) &&
+                        isfinite(process->transport->tempo) && process->transport->tempo > 1.0)
                         bpm = process->transport->tempo;
-                    if (process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
+                    if ((process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE) &&
+                        isfinite((double)process->transport->song_pos_beats))
                         beat_pos = (double)process->transport->song_pos_beats / (double)CLAP_BEATTIME_FACTOR;
                     if (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)
                         is_playing = 1;
@@ -838,36 +856,6 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         /* If an event occurs at the current cursor, the loop above applies it.
            If the event list contains pathological duplicate/old timestamps,
            the event index still advances, preventing an infinite loop. */
-    }
-
-    /* No-event path and any remaining frames. */
-    if (cursor < frame_count) {
-        const uint32_t slice = frame_count - cursor;
-        const float *segment_src = NULL;
-
-        if (p->test_pulse >= 0.5) {
-            double bpm = 120.0;
-            double beat_pos = 0.0;
-            int is_playing = 0;
-            if (process->transport) {
-                if ((process->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && process->transport->tempo > 1.0)
-                    bpm = process->transport->tempo;
-                if (process->transport->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE)
-                    beat_pos = (double)process->transport->song_pos_beats / (double)CLAP_BEATTIME_FACTOR;
-                if (process->transport->flags & CLAP_TRANSPORT_IS_PLAYING)
-                    is_playing = 1;
-            }
-            double slice_beat = beat_pos;
-            if (is_playing && p->sample_rate > 1000.0) {
-                slice_beat += (double)cursor * (bpm / (60.0 * p->sample_rate));
-            }
-            hrtf_test_gen_process(&p->test_gen, p->test_buf, slice, bpm, slice_beat, is_playing);
-            segment_src = p->test_buf;
-        } else {
-            segment_src = src + cursor;
-        }
-
-        hrtf_process(p->core, segment_src, dst, slice);
     }
 
     return CLAP_PROCESS_CONTINUE;
@@ -912,6 +900,9 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *factory,
     p->rotation_phase = 0.0;
     p->elevation_deg = 0.0;
     p->space = 0.15;
+    p->test_pulse = 0.0;
+    p->test_tone = 0.5;
+    p->ear_scale = 1.0;
 
     p->plugin.desc = &descriptor;
     p->plugin.plugin_data = p;

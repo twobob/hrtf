@@ -102,11 +102,11 @@ $$g_L = 1 - s(1 - \text{far\_gain}), \quad g_R = 1, \quad \text{norm} = \sqrt{\f
 ### 4. Anthropometric Pinna Spectral Cues
 Five cascading biquad filters in transposed direct-form II dynamically shape frequency content based on orientation and scale factor $\alpha$:
 - **Presence Resonance Peak**: Centred at $f = 3900\text{ Hz} / \alpha$, boosting up to $+9\text{ dB}$ for frontal sources to provide clarity and front-image definition.
-- **Dynamic Concha Notch**: Median-plane elevation notch shifting between $4.5\text{ kHz}$ (below) and $9.5\text{ kHz}$ (overhead), scaled by $\alpha$:
+- **Dynamic Concha Notch**: Median-plane elevation notch providing pinna attenuation shifting between $3.5\text{ kHz}$ (below, $v=-1$) and $9.5\text{ kHz}$ (overhead, $v=+1$), scaled by $\alpha$:
   $$f_{\text{notch}} = \frac{6500 + 3000 v}{\alpha}$$
 - **High-Frequency Air Shelf**: Cutoff at $8500\text{ Hz} / \alpha$, progressively attenuating rearward and overhead sources.
 - **Lateral Pinna Asymmetry**: Peaking filter at $2200\text{ Hz} / \alpha$, differentiating lateral positions from standard intensity panning.
-- **Near-Field Low-Frequency ILD Divergence (DVF)**: Low-shelf filter at $350\text{ Hz} / \alpha$ delivering up to $+9.5\text{ dB}$ bass boost on the near ear for sources within $1\text{ metre}$.
+- **Near-Field Low-Frequency ILD Divergence (DVF)**: Low-shelf filter at $350\text{ Hz} / \alpha$ delivering up to $9.5\text{ dB}$ of low-frequency ILD divergence ($\pm 4.75\text{ dB}$ near/far ear shelving) for sources within $1\text{ metre}$.
 
 ### 5. Room Boundary Early Reflection Engine
 A 50 ms circular buffer models early reflections from five boundary surfaces:
@@ -144,15 +144,15 @@ Reflections pass through a 1-pole high-frequency wall absorption filter ($35\%$ 
 
 ## Parameters Reference
 
-| ID | Parameter | Display Name | Range | Default | Unit | Description |
+| ID (VST3/CLAP) | Parameter | Display Name | VST3 Range & Units | CLAP Range & Units | Default | Description |
 |---|---|---|---|---|---|---|
-| `100` / `1` | `kParamDistance` | **Distance** | 0.05 – 20.0 | 2.0 | metres (`m`) | Radial distance of the sound source. Follows $1/d$ inverse-distance law attenuation with near-field DVF divergence. |
-| `101` / `2` | `kParamRotation` | **Rotation** | 0.0 – 360.0 | 0.0 | degrees (`deg`) | Horizontal azimuth angle. $0^\circ = \text{Front}$, $90^\circ = \text{Right}$, $180^\circ = \text{Rear}$, $270^\circ = \text{Left}$. |
-| `102` / `3` | `kParamElevation` | **Elevation** | -90.0 – +90.0 | 0.0 | degrees (`deg`) | Vertical angle. $-90^\circ = \text{Below}$, $0^\circ = \text{Horizontal}$, $+90^\circ = \text{Directly Overhead}$. Modulates concha notches. |
-| `103` / `4` | `kParamSpace` | **Space** | 0.0 – 100.0 | 15.0 | percent (`%`) | Room boundary early reflection gain. Pulls the perceived sound out of the skull into a natural virtual room. |
-| `104` / `5` | `kParamTestPulse` | **Test Pulse** | Off / On (0 / 1) | Off | toggle | Dedicated tick-box replacing track audio with tempo-synchronised test pulses aligned to DAW musical beats. |
-| `105` / `6` | `kParamTestTone` | **Test Tone** | 0.0 – 100.0 | 50.0 | percent (`%`) | Timbre morphing: `0%` = sub-rumble thud, `50%` = calibrated $1/f$ pink noise burst, `100%` = crisp transient snap. |
-| `106` / `7` | `kParamEarScale` | **Ear Scale** | 70.0 – 130.0 | 100.0 | percent (`%`) | Anthropometric skull and pinna scaling factor $\alpha$. Adjusts ITD delay and shifts notch frequencies ($f' = f / \alpha$). |
+| `100` / `1` | `kParamDistance` | **Distance** | 0.05 – 20.0 m | 0.05 – 20.0 m | 2.0 m | Radial distance. Follows $1/d$ inverse-distance law with near-field DVF divergence. |
+| `101` / `2` | `kParamRotation` | **Rotation** | 0.0 – 360.0 deg | 0.0 – 1.0 phase | 0.0 (front) | Horizontal azimuth angle ($0.25 = 90^\circ$ right, $0.5 = 180^\circ$ rear, $0.75 = 270^\circ$ left). |
+| `102` / `3` | `kParamElevation` | **Elevation** | -90.0 – +90.0 deg | -90.0 – +90.0 deg | 0.0 deg | Vertical angle ($-90^\circ$ below, $0^\circ$ horizontal, $+90^\circ$ overhead). Modulates concha notches. |
+| `103` / `4` | `kParamSpace` | **Space** | 0.0 – 100.0 % | 0.0 – 1.0 factor | 15.0 % (0.15) | Room boundary early reflection gain. Pulls perceived sound out of the skull. |
+| `104` / `5` | `kParamTestPulse` | **Test Pulse** | Off / On (0 / 1) | Off / On (0.0 / 1.0) | Off | Dedicated tick-box replacing track audio with tempo-synchronised test pulses. |
+| `105` / `6` | `kParamTestTone` | **Test Tone** | 0.0 – 100.0 % | 0.0 – 1.0 factor | 50.0 % (0.50) | Timbre morphing: `0%` = sub-rumble, `50%` = calibrated pink noise, `100%` = crisp transient snap. |
+| `106` / `7` | `kParamEarScale` | **Ear Scale** | 70.0 – 130.0 % | 0.70 – 1.30 factor | 100.0 % (1.00) | Anthropometric skull and pinna scale $\alpha$. Scales ITD delay and shifts notch frequencies ($f' = f / \alpha$). |
 
 All parameters feature continuous exponential slewing ($20\text{ ms}$ to $50\text{ ms}$) in `hrtf_core.c` to guarantee completely zipper-free, glitch-free automation during live playback.
 
@@ -308,6 +308,7 @@ g:\dev\hrtf\
 │   └── version.h                   # Plugin versioning metadata
 ├── test_signals/                   # Reference audio directory
 ├── clap-src/                       # CLAP SDK headers (git submodule)
+├── clap-wrapper/                   # CLAP wrapper utility (git submodule)
 ├── pluginterfaces/                 # Steinberg VST3 SDK interfaces (git submodule)
 └── public.sdk/                     # Steinberg VST3 SDK source (git submodule)
 ```

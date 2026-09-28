@@ -15,6 +15,7 @@
 # Built plugin binaries (bundles under /bundle/ are covered above)
 *.clap
 *.vst3
+/pulsed_pink_noise_48k.wav
 
 # ---------------------------------------------------------------
 # Editor / OS cruft
@@ -35,7 +36,7 @@ desktop.ini
 *.pyd
 *.pyw
 __pycache__/
-*.egg-info/
-.venv/
-venv/
-env/
+/*.egg-info/
+/.venv/
+/venv/
+/env/

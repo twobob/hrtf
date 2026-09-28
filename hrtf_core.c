@@ -6,7 +6,7 @@
 
 #define HRTF_PI 3.141592653589793238462643383279502884
 #define HRTF_MAX_ITD_S 0.00070
-#define HRTF_MAX_DELAY_SAMPLES 128
+#define HRTF_MAX_DELAY_SAMPLES 512
 
 typedef struct {
     double b0,b1,b2,a1,a2;
@@ -15,7 +15,6 @@ typedef struct {
 
 struct HrtfCore {
     double fs;
-    size_t max_block;
     double distance_m;
     double phase;
     double elevation_deg;
@@ -40,9 +39,6 @@ struct HrtfCore {
 
     Biquad l[5];
     Biquad r[5];
-
-    double last_phase;
-    double last_distance;
 };
 
 static double clampd(double x, double lo, double hi)
@@ -177,10 +173,13 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     const double scale = clampd(ear_scale, 0.70, 1.30);
     const double inv_scale = 1.0 / scale;
 
+    /* Protect against filter instability at low sample rates (e.g. 32 kHz) by clamping below Nyquist */
+    const double max_f = 0.48 * h->fs;
+
     /* Dynamic elevation concha notch:
        Median plane notch shifts from ~4.5 kHz (below) up to ~9.5 kHz (overhead),
        scaled by anthropometric ear dimensions. */
-    const double f_notch = clampd((6500.0 + 3000.0 * v) * inv_scale, 3000.0, 15000.0);
+    const double f_notch = clampd((6500.0 + 3000.0 * v) * inv_scale, 3000.0, clampd(15000.0, 3000.0, max_f));
     const double notch = -4.0 * rear - 3.5 * clampd(-v, 0.0, 1.0);
 
     /* High-frequency air falls towards rear, and undergoes cranial shadow from overhead. */
@@ -192,10 +191,10 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     const double left_far  = clampd(s, 0.0, 1.0);
     const double right_far = clampd(-s, 0.0, 1.0);
 
-    const double f_presence = clampd(3900.0 * inv_scale, 1500.0, 7500.0);
-    const double f_air = clampd(8500.0 * inv_scale, 4000.0, 18000.0);
-    const double f_side = clampd(2200.0 * inv_scale, 1000.0, 4500.0);
-    const double f_nf = clampd(350.0 * inv_scale, 150.0, 800.0);
+    const double f_presence = clampd(3900.0 * inv_scale, 1500.0, clampd(7500.0, 1500.0, max_f));
+    const double f_air = clampd(8500.0 * inv_scale, 4000.0, clampd(18000.0, 4000.0, max_f));
+    const double f_side = clampd(2200.0 * inv_scale, 1000.0, clampd(4500.0, 1000.0, max_f));
+    const double f_nf = clampd(350.0 * inv_scale, 150.0, clampd(800.0, 150.0, max_f));
 
     biquad_peaking(&l[0], h->fs, f_presence, 0.85, presence);
     biquad_peaking(&r[0], h->fs, f_presence, 0.85, presence);
@@ -238,17 +237,19 @@ HrtfCore *hrtf_create(double sample_rate, size_t max_block)
     HrtfCore *h = (HrtfCore *)calloc(1, sizeof(*h));
     if (!h) return NULL;
 
+    (void)max_block;
     h->fs = sample_rate;
-    h->max_block = max_block;
     h->distance_m = h->distance_smooth = 2.0;
     h->phase = h->phase_smooth = 0.0;
     h->elevation_deg = h->elevation_smooth = 0.0;
     h->space = h->space_smooth = 0.15; /* 15% default room externalisation */
     h->ear_scale = h->ear_scale_smooth = 1.0; /* 100% standard anthropometric scale */
 
-    size_t needed = (size_t)ceil(sample_rate * HRTF_MAX_ITD_S * 1.5) + 8;
+    /* Ensure delay line is sized to accommodate maximum near-field ITD (~1.46 ms)
+       with margin at any sample rate up to 192 kHz. */
+    size_t needed = (size_t)ceil(sample_rate * 0.0020) + 32;
     if (needed < 16) needed = 16;
-    if (needed > HRTF_MAX_DELAY_SAMPLES * 4) needed = HRTF_MAX_DELAY_SAMPLES * 4;
+    if (needed > HRTF_MAX_DELAY_SAMPLES) needed = HRTF_MAX_DELAY_SAMPLES;
     h->delay_size = needed;
 
     h->delay_l = (float *)calloc(h->delay_size, sizeof(float));
@@ -300,8 +301,6 @@ void hrtf_reset(HrtfCore *h)
     h->elevation_smooth = clampd(h->elevation_deg, -90.0, 90.0);
     h->space_smooth = clampd(h->space, 0.0, 1.0);
     h->ear_scale_smooth = clampd(h->ear_scale, 0.70, 1.30);
-    h->last_phase = h->phase_smooth;
-    h->last_distance = h->distance_smooth;
 }
 
 void hrtf_set_distance(HrtfCore *h, double distance_m)
@@ -418,8 +417,10 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         distance_gain = clampd(distance_gain, 0.05, 1.0);
 
         /* Near-field ITD correction: spherical wavefront curvature increases
-           effective acoustic path length to far ear at distances < 1m. */
-        const double nf_itd_scale = (d < 1.0) ? (1.0 + 0.00765 / (2.0 * d * d + 0.00765)) : 1.0;
+           effective acoustic path length to far ear at distances < 1m.
+           Subtract offset at d = 1m so scale transitions continuously to 1.0 with zero jump. */
+        const double nf_itd_offset = 0.00765 / (2.0 + 0.00765);
+        const double nf_itd_scale = (d < 1.0) ? (1.0 + (0.00765 / (2.0 * d * d + 0.00765) - nf_itd_offset)) : 1.0;
 
         /* ITD: max ~0.70 ms scaled by lateral projection, near-field factor, and ear scale. */
         const double itd_s = HRTF_MAX_ITD_S * s * nf_itd_scale * h->ear_scale_smooth;
@@ -659,13 +660,13 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
         if (tone <= 0.5) {
             /* Blend rumble (tone=0.0) to pink noise (tone=0.5) */
             float r = (float)(tone * 2.0);
-            float rumble = gen->rumble_lpf * 1.8f;
-            sig = (1.0f - r) * rumble + r * (pink * 0.18f);
+            float rumble = gen->rumble_lpf * 1.2f;
+            sig = (1.0f - r) * rumble + r * (pink * 0.12f);
         } else {
             /* Blend pink noise (tone=0.5) to crisp transient/snap (tone=1.0) */
             float t = (float)((tone - 0.5) * 2.0);
-            float crisp = (white - gen->b3) * 0.30f;
-            sig = (1.0f - t) * (pink * 0.18f) + t * crisp;
+            float crisp = (white - gen->b3) * 0.20f;
+            sig = (1.0f - t) * (pink * 0.12f) + t * crisp;
         }
 
         out_mono[i] = sig * envelope;

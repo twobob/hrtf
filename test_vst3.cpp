@@ -544,6 +544,18 @@ int main()
                 std::cerr << "ERROR: Test Pulse generator failed to produce audio from silent input (energy=" << pulse_energy << ")\n";
                 ++failures;
             }
+
+            // Verify Test Pulse disabled state produces silence from silent input
+            pulseChanges.q.val = 0.0;
+            for (int b = 0; b < 10; ++b) p.processor->process (data);
+            double off_energy = 0.0;
+            for (int i = 0; i < NP; ++i) off_energy += std::abs (pulse_l[i]) + std::abs (pulse_r[i]);
+            if (off_energy < 1e-6) {
+                std::cout << "SUCCESS: Test Pulse generator OFF state produces silence.\n";
+            } else {
+                std::cerr << "ERROR: Test Pulse generator stuck ON when disabled (energy=" << off_energy << ")\n";
+                ++failures;
+            }
         }
         releaseProcessor (p);
     }

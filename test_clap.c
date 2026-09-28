@@ -234,7 +234,17 @@ int main(void) {
         printf("ERROR: Failed to load generated test pulse WAV file 'pulsed_pink_noise_48k.wav'\n");
         ++failures;
     } else {
-        printf("SUCCESS: Loaded generated test pulse WAV file 'pulsed_pink_noise_48k.wav' (%zu samples).\n", wav_count);
+        float max_peak = 0.0f;
+        for (size_t i = 0; i < wav_count; ++i) {
+            if (fabsf(wav_buf[i]) > max_peak) max_peak = fabsf(wav_buf[i]);
+        }
+        if (max_peak > 0.999f) {
+            printf("ERROR: Loaded WAV contains railed/clipped samples (peak=%f)\n", max_peak);
+            ++failures;
+        } else {
+            printf("SUCCESS: Loaded generated test pulse WAV file 'pulsed_pink_noise_48k.wav' (%zu samples, peak=%f, unclipped).\n",
+                   wav_count, max_peak);
+        }
     }
 
     float in_buf[256];
@@ -464,6 +474,92 @@ int main(void) {
                 printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
 
+            /* Verify legacy state v1 migration: resets unrepresented parameters to defaults */
+            {
+                MemStream v1_mem;
+                memset(&v1_mem, 0, sizeof(v1_mem));
+                memcpy(v1_mem.data, "HRTF", 4);
+                uint32_t v1_hdr = 1;
+                double v1_data[2] = { 4.5, 0.25 };
+                memcpy(v1_mem.data + 4, &v1_hdr, sizeof(v1_hdr));
+                memcpy(v1_mem.data + 8, v1_data, sizeof(v1_data));
+                v1_mem.size = 8 + sizeof(v1_data);
+
+                clap_istream_t in_str = { &v1_mem, mem_read };
+                if (!state->load(plugin, &in_str)) {
+                    printf("ERROR: failed to load legacy v1 state stream\n");
+                    ++failures;
+                } else {
+                    double d1 = 0, r1 = 0, s1 = 0, es1 = 0;
+                    params->get_value(plugin, 1, &d1);
+                    params->get_value(plugin, 2, &r1);
+                    params->get_value(plugin, 4, &s1);
+                    params->get_value(plugin, 7, &es1);
+                    if (fabs(d1 - 4.5) < 1e-9 && fabs(r1 - 0.25) < 1e-9 &&
+                        fabs(s1 - 0.15) < 1e-9 && fabs(es1 - 1.0) < 1e-9) {
+                        printf("SUCCESS: legacy v1 state correctly loaded and reset new parameters to defaults.\n");
+                    } else {
+                        printf("ERROR: legacy v1 state migration failed (d=%f, r=%f, s=%f, es=%f)\n",
+                               d1, r1, s1, es1);
+                        ++failures;
+                    }
+                }
+            }
+
+            /* Test near-field ITD delay without aliasing: d = 5 cm, ear_scale = 1.30, 90 deg right */
+            {
+                flush_param(plugin, params, 1, 0.05); /* 5 cm distance */
+                flush_param(plugin, params, 2, 0.25); /* 90 deg right */
+                flush_param(plugin, params, 3, 0.0);  /* horizontal */
+                flush_param(plugin, params, 4, 0.0);  /* anechoic to isolate ITD */
+                flush_param(plugin, params, 5, 0.0);  /* Test pulse OFF */
+                flush_param(plugin, params, 7, 1.30); /* 130% ear scale */
+
+                /* Clear history and wait for parameter smoothers to reach steady state (50 ms time constant) */
+                for (uint32_t i = 0; i < N; ++i) in_buf[i] = 0.0f;
+                for (int b = 0; b < 40; ++b) plugin->process(plugin, &process);
+
+                /* Feed single-sample unit impulse */
+                in_buf[0] = 1.0f;
+                plugin->process(plugin, &process);
+
+                /* Locate peak arrival in left (far) ear */
+                uint32_t far_peak_idx = 0;
+                float far_peak_val = 0.0f;
+                for (uint32_t i = 0; i < N; ++i) {
+                    if (fabsf(out_l[i]) > far_peak_val) {
+                        far_peak_val = fabsf(out_l[i]);
+                        far_peak_idx = i;
+                    }
+                }
+
+                /* Near-field ITD should be ~60-70 samples; if aliased to 59-sample buffer it wraps to ~2 samples */
+                if (far_peak_idx >= 55 && far_peak_idx <= 75) {
+                    printf("SUCCESS: Near-field ITD delay is %u samples (expected ~60-70, correctly un-aliased).\n",
+                           far_peak_idx);
+                } else {
+                    printf("ERROR: Near-field ITD aliased! Peak arrived at sample %u instead of ~60-70\n",
+                           far_peak_idx);
+                    ++failures;
+                }
+            }
+
+            /* Test Test Pulse "OFF" state: ensure generator shuts off cleanly with silence in */
+            {
+                flush_param(plugin, params, 5, 0.0); /* Disable Test Pulse */
+                for (uint32_t i = 0; i < N; ++i) in_buf[i] = 0.0f;
+                for (int b = 0; b < 10; ++b) plugin->process(plugin, &process);
+                float silent_sum = 0.0f;
+                for (uint32_t i = 0; i < N; ++i) silent_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+                if (silent_sum < 1e-5f) {
+                    printf("SUCCESS: Test pulse generator OFF state confirmed (silent output: sum=%e).\n",
+                           silent_sum);
+                } else {
+                    printf("ERROR: Test pulse generator stuck ON when disabled (sum=%f)\n", silent_sum);
+                    ++failures;
+                }
+            }
+
             /* Test internal pulse generation with silent input */
             for (uint32_t i = 0; i < N; ++i) {
                 in_buf[i] = 0.0f;
@@ -503,24 +599,33 @@ int main(void) {
                 ++failures;
             }
 
-            /* Dogfood internal test pulse tone morphing: rumble vs crisp */
+            /* Dogfood internal test pulse tone morphing: rumble vs crisp with spectral slew delta over 1 beat */
             flush_param(plugin, params, 2, 0.0); /* centre */
+            flush_param(plugin, params, 5, 1.0); /* Enable pulse */
             flush_param(plugin, params, 6, 0.0); /* sub rumble */
-            for (int b = 0; b < 4; ++b) plugin->process(plugin, &process);
-            float rumble_sum = 0.0f;
-            for (uint32_t i = 0; i < N; ++i) rumble_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+            float rumble_deltas = 0.0f;
+            for (int b = 0; b < 100; ++b) {
+                plugin->process(plugin, &process);
+                for (uint32_t i = 1; i < N; ++i) {
+                    rumble_deltas += fabsf(out_l[i] - out_l[i-1]) + fabsf(out_r[i] - out_r[i-1]);
+                }
+            }
 
             flush_param(plugin, params, 6, 1.0); /* crisp transient */
-            for (int b = 0; b < 4; ++b) plugin->process(plugin, &process);
-            float crisp_sum = 0.0f;
-            for (uint32_t i = 0; i < N; ++i) crisp_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+            float crisp_deltas = 0.0f;
+            for (int b = 0; b < 100; ++b) {
+                plugin->process(plugin, &process);
+                for (uint32_t i = 1; i < N; ++i) {
+                    crisp_deltas += fabsf(out_l[i] - out_l[i-1]) + fabsf(out_r[i] - out_r[i-1]);
+                }
+            }
 
-            if (fabsf(rumble_sum - crisp_sum) > 0.01f) {
-                printf("SUCCESS: Dogfooded internal test tone spectrum shift (rumble=%f, crisp=%f).\n",
-                       rumble_sum, crisp_sum);
+            if (crisp_deltas > rumble_deltas * 1.5f) {
+                printf("SUCCESS: Dogfooded internal test tone spectrum shift (crisp delta=%f > rumble delta=%f).\n",
+                       crisp_deltas, rumble_deltas);
             } else {
-                printf("ERROR: Test tone did not alter internal pulse spectrum (rumble=%f, crisp=%f)\n",
-                       rumble_sum, crisp_sum);
+                printf("ERROR: Test tone did not increase transient sharpness (rumble=%f, crisp=%f)\n",
+                       rumble_deltas, crisp_deltas);
                 ++failures;
             }
         }

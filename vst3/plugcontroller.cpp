@@ -93,6 +93,11 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
         if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
             setParamNormalized (kParamSpace, sNorm);
     }
+    else
+    {
+        setParamNormalized (kParamElevation, 0.5);
+        setParamNormalized (kParamSpace, 0.15);
+    }
 
     if (version >= 3)
     {
@@ -101,6 +106,10 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
         if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
             setParamNormalized (kParamTestPulse, pNorm);
+    }
+    else
+    {
+        setParamNormalized (kParamTestPulse, 0.0);
     }
 
     if (version >= 4)
@@ -113,6 +122,11 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
             setParamNormalized (kParamTestTone, tNorm);
         if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
             setParamNormalized (kParamEarScale, esNorm);
+    }
+    else
+    {
+        setParamNormalized (kParamTestTone, 0.5);
+        setParamNormalized (kParamEarScale, 0.5);
     }
 
     return Steinberg::kResultOk;

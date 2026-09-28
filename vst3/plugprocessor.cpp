@@ -182,7 +182,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 {
     /* Parameter changes are honoured at the sample offset the host asked
        for, not applied to the whole block from its first sample. */
-    constexpr Steinberg::int32 kMaxQueues = 8;
+    constexpr Steinberg::int32 kMaxQueues = 32;
     Steinberg::Vst::IParamValueQueue* queues[kMaxQueues] = {};
     Steinberg::int32 consumed[kMaxQueues] = {};
     Steinberg::int32 numQueues = 0;
@@ -287,11 +287,12 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
                 if (data.processContext)
                 {
                     if ((data.processContext->state & Steinberg::Vst::ProcessContext::kTempoValid) &&
-                        data.processContext->tempo > 1.0)
+                        std::isfinite (data.processContext->tempo) && data.processContext->tempo > 1.0)
                     {
                         bpm = data.processContext->tempo;
                     }
-                    if (data.processContext->state & Steinberg::Vst::ProcessContext::kProjectTimeMusicValid)
+                    if ((data.processContext->state & Steinberg::Vst::ProcessContext::kProjectTimeMusicValid) &&
+                        std::isfinite (data.processContext->projectTimeMusic))
                     {
                         beatPos = data.processContext->projectTimeMusic;
                     }
@@ -357,6 +358,11 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
         if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
             mSpaceNorm = sNorm;
     }
+    else
+    {
+        mElevationNorm = 0.5;
+        mSpaceNorm = 0.15;
+    }
 
     if (version >= 3)
     {
@@ -365,6 +371,10 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
         if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
             mTestPulseNorm = pNorm;
+    }
+    else
+    {
+        mTestPulseNorm = 0.0;
     }
 
     if (version >= 4)
@@ -380,6 +390,12 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
         }
         if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
             mEarScaleNorm = esNorm;
+    }
+    else
+    {
+        mTestToneNorm = 0.5;
+        hrtf_test_gen_set_tone (&mTestGen, 0.5);
+        mEarScaleNorm = 0.5;
     }
 
     if (mCore)

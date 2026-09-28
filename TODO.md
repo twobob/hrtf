@@ -19,7 +19,7 @@ This document tracks future enhancements and research targets derived from the l
 - [ ] **OSC (Open Sound Control) Input**:
   - Add an asynchronous OSC UDP listener thread to receive orientation streams (`yaw`, `pitch`, `roll`) from external head-trackers (e.g. Supperware, Bridgehead, Waves Nx, AirPods via head-tracking bridge).
 - [ ] **MIDI CC Mapping for Orientation**:
-  - Support high-resolution 14-bit MIDI CC or VST3 parameter mapping for head rotation.
+  - Support high-resolution 14-bit MIDI CC mapping for external head-tracker hardware.
 - [ ] **Coordinate Frame Transformation**:
   - Implement dynamic spherical rotation matrix transformations between world coordinates and listener head coordinates with $< 20\text{ ms}$ motion-to-sound latency to eliminate static front/back confusion.
 
