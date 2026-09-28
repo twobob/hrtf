@@ -561,7 +561,7 @@ int main(void) {
                 }
 
                 /* Near-field ITD should be ~60-70 samples; if aliased to 59-sample buffer it wraps to ~2 samples */
-                if (far_peak_idx >= 55 && far_peak_idx <= 75) {
+                if (far_peak_idx >= 60 && far_peak_idx <= 70) {
                     printf("SUCCESS: Near-field ITD delay is %u samples (expected ~60-70, correctly un-aliased).\n",
                            far_peak_idx);
                 } else {
@@ -621,7 +621,7 @@ int main(void) {
                 for (int b = 0; b < 10; ++b) plugin->process(plugin, &process);
                 float silent_sum = 0.0f;
                 for (uint32_t i = 0; i < N; ++i) silent_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
-                if (silent_sum < 1e-5f) {
+                if (silent_sum < 1e-11f) {
                     printf("SUCCESS: Test pulse generator OFF state confirmed (silent output: sum=%e).\n",
                            silent_sum);
                 } else {
@@ -690,7 +690,7 @@ int main(void) {
                 }
             }
 
-            if (crisp_deltas > rumble_deltas * 1.5f) {
+            if (crisp_deltas > rumble_deltas * 2.0f) {
                 printf("SUCCESS: Dogfooded internal test tone spectrum shift (crisp delta=%f > rumble delta=%f).\n",
                        crisp_deltas, rumble_deltas);
             } else {
