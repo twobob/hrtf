@@ -29,7 +29,7 @@ Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and
 - **Frequency-Dependent Cranial Head Shadow**: Differentiates low-frequency spherical diffraction ($-4\text{ dB}$ LF shadow) from deep high-frequency shadowing (up to $-13\text{ dB}$ HF shadow).
 - **3D Directional Room Boundaries & Distance-Dependent DRR**: Early reflections dynamically modulated by source direction cosines $(s, c, v)$ and decoupled from direct sound to establish an authentic Direct-to-Reverberant Ratio gradient with distance.
 - **Anthropometric Head & Pinna Scaling**: Adjust head circumference and ear dimensions from $70\%$ to $130\%$, scaling ITD time delays and shifting spectral pinna notch frequencies accordingly.
-- **Integrated Psychoacoustic Test Pulse Generator**: Built-in tick-box generator synthesising tempo-aligned pulses (pink noise, sine, or Dirac clicks) across a morphable low-rumble to crisp-transient timbre continuum.
+- **Integrated Psychoacoustic Test Pulse Generator**: Built-in tick-box generator synthesising tempo-aligned pulsed pink noise across a morphable low-rumble to crisp-transient timbre continuum (with additional sine and Dirac click impulse modes available in the CLI synthesis tool).
 - **Sample-Accurate Automation**: VST3 parameter changes take effect at their exact sample offsets within the block.
 
 ---
