@@ -32,6 +32,8 @@ public:
     }
 
 private:
+    void applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value);
+
     HrtfCore* mCore = nullptr;
     double mSampleRate = 48000.0;
     Steinberg::Vst::ParamValue mDistanceNorm = 0.09774436; // (2.0 - 0.05) / 19.95 = ~0.097744

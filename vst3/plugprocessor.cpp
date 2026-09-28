@@ -98,47 +98,60 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
     return AudioEffect::setActive (state);
 }
 
+void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value)
+{
+    /* A non-finite or out-of-range value must never be cached or saved. */
+    if (!std::isfinite (value)) return;
+    if (value < 0.0) value = 0.0;
+    if (value > 1.0) value = 1.0;
+
+    if (id == kParamDistance)
+    {
+        mDistanceNorm = value;
+        if (mCore)
+            hrtf_set_distance (mCore, 0.05 + value * (20.0 - 0.05));
+    }
+    else if (id == kParamRotation)
+    {
+        mRotationNorm = value;
+        if (mCore)
+            hrtf_set_rotation_phase (mCore, value);
+    }
+}
+
 Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessData& data)
 {
+    /* Parameter changes are honoured at the sample offset the host asked
+       for, not applied to the whole block from its first sample. */
+    constexpr Steinberg::int32 kMaxQueues = 8;
+    Steinberg::Vst::IParamValueQueue* queues[kMaxQueues] = {};
+    Steinberg::int32 consumed[kMaxQueues] = {};
+    Steinberg::int32 numQueues = 0;
+
     if (data.inputParameterChanges)
     {
-        Steinberg::int32 numParams = data.inputParameterChanges->getParameterCount ();
-        for (Steinberg::int32 i = 0; i < numParams; ++i)
-        {
-            Steinberg::Vst::IParamValueQueue* queue = data.inputParameterChanges->getParameterData (i);
-            if (!queue) continue;
-
-            Steinberg::Vst::ParamValue val;
-            Steinberg::int32 sampleOffset;
-            Steinberg::int32 numPoints = queue->getPointCount ();
-            if (numPoints > 0 && queue->getPoint (numPoints - 1, sampleOffset, val) == Steinberg::kResultTrue)
-            {
-                /* A non-finite parameter value must never be cached or saved. */
-                if (!std::isfinite (val)) continue;
-
-                if (queue->getParameterId () == kParamDistance)
-                {
-                    mDistanceNorm = val;
-                    if (mCore)
-                    {
-                        double dist_m = 0.05 + val * (20.0 - 0.05);
-                        hrtf_set_distance (mCore, dist_m);
-                    }
-                }
-                else if (queue->getParameterId () == kParamRotation)
-                {
-                    mRotationNorm = val;
-                    if (mCore)
-                    {
-                        hrtf_set_rotation_phase (mCore, val);
-                    }
-                }
-            }
-        }
+        numQueues = data.inputParameterChanges->getParameterCount ();
+        if (numQueues > kMaxQueues) numQueues = kMaxQueues;
+        for (Steinberg::int32 i = 0; i < numQueues; ++i)
+            queues[i] = data.inputParameterChanges->getParameterData (i);
     }
 
     if (data.numSamples <= 0 || !mCore)
+    {
+        /* No audio to render, but a host flushes the final value this way. */
+        for (Steinberg::int32 i = 0; i < numQueues; ++i)
+        {
+            if (!queues[i]) continue;
+            const Steinberg::int32 points = queues[i]->getPointCount ();
+            if (points <= 0) continue;
+
+            Steinberg::int32 offset = 0;
+            Steinberg::Vst::ParamValue value = 0.0;
+            if (queues[i]->getPoint (points - 1, offset, value) == Steinberg::kResultTrue)
+                applyParameter (queues[i]->getParameterId (), value);
+        }
         return Steinberg::kResultOk;
+    }
 
     if (data.numInputs < 1 || data.numOutputs < 1)
         return Steinberg::kResultOk;
@@ -152,7 +165,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
         !outBus.channelBuffers32[0] || !outBus.channelBuffers32[1])
         return Steinberg::kResultOk;
 
-    Steinberg::uint32 numSamples = (Steinberg::uint32)data.numSamples;
+    const Steinberg::uint32 numSamples = (Steinberg::uint32)data.numSamples;
     if (mMonoBuffer.size () < numSamples)
         mMonoBuffer.resize (numSamples);
 
@@ -177,8 +190,45 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
         std::fill (mono, mono + numSamples, 0.0f);
     }
 
-    float* outStereo[2] = { outBus.channelBuffers32[0], outBus.channelBuffers32[1] };
-    hrtf_process (mCore, mono, outStereo, numSamples);
+    Steinberg::int32 cursor = 0;
+    while (cursor < (Steinberg::int32)numSamples)
+    {
+        Steinberg::int32 next = (Steinberg::int32)numSamples;
+
+        for (Steinberg::int32 i = 0; i < numQueues; ++i)
+        {
+            if (!queues[i]) continue;
+            const Steinberg::int32 points = queues[i]->getPointCount ();
+
+            for (;;)
+            {
+                if (consumed[i] >= points) break;
+
+                Steinberg::int32 offset = 0;
+                Steinberg::Vst::ParamValue value = 0.0;
+                if (queues[i]->getPoint (consumed[i], offset, value) != Steinberg::kResultTrue)
+                {
+                    ++consumed[i];
+                    continue;
+                }
+                if (offset <= cursor)
+                {
+                    applyParameter (queues[i]->getParameterId (), value);
+                    ++consumed[i];
+                    continue;
+                }
+                if (offset < next) next = offset;
+                break;
+            }
+        }
+
+        if (next <= cursor) break; /* no forward progress: stop rather than spin */
+
+        float* outSeg[2] = { outBus.channelBuffers32[0] + cursor,
+                             outBus.channelBuffers32[1] + cursor };
+        hrtf_process (mCore, mono + cursor, outSeg, (size_t)(next - cursor));
+        cursor = next;
+    }
 
     /* The whole block was written, so the output is not silent. A stale
        "silent" flag left set makes hosts skip mixing real audio. */

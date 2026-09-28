@@ -1,6 +1,7 @@
 #include <iostream>
 #include <windows.h>
 #include <cmath>
+#include <cstring>
 
 #include "pluginterfaces/base/ipluginbase.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
@@ -14,13 +15,14 @@ class DummyQueue : public Steinberg::Vst::IParamValueQueue
 public:
     Steinberg::Vst::ParamID id = 0;
     double val = 0.0;
+    Steinberg::int32 pointOffset = 0;
     Steinberg::tresult PLUGIN_API queryInterface (const Steinberg::TUID, void**) override { return Steinberg::kNoInterface; }
     Steinberg::uint32 PLUGIN_API addRef () override { return 1; }
     Steinberg::uint32 PLUGIN_API release () override { return 1; }
     Steinberg::Vst::ParamID PLUGIN_API getParameterId () override { return id; }
     Steinberg::int32 PLUGIN_API getPointCount () override { return 1; }
     Steinberg::tresult PLUGIN_API getPoint (Steinberg::int32, Steinberg::int32& offset, Steinberg::Vst::ParamValue& value) override {
-        offset = 0; value = val; return Steinberg::kResultTrue;
+        offset = pointOffset; value = val; return Steinberg::kResultTrue;
     }
     Steinberg::tresult PLUGIN_API addPoint (Steinberg::int32, Steinberg::Vst::ParamValue, Steinberg::int32&) override { return Steinberg::kResultOk; }
 };
@@ -40,6 +42,59 @@ public:
 typedef bool (*InitDllFunc)();
 typedef bool (*ExitDllFunc)();
 typedef Steinberg::IPluginFactory* (*GetPluginFactoryFunc)();
+
+// A freshly created, activated processor in its default state.
+struct Proc
+{
+    Steinberg::Vst::IAudioProcessor* processor = nullptr;
+    Steinberg::Vst::IComponent* comp = nullptr;
+};
+
+static Proc makeProcessor (Steinberg::IPluginFactory* factory)
+{
+    Proc p;
+    if (factory->createInstance (RotatingHrtf::kProcessorUID,
+                                 Steinberg::Vst::IAudioProcessor::iid,
+                                 (void**)&p.processor) != Steinberg::kResultTrue || !p.processor)
+    {
+        p.processor = nullptr;
+        return p;
+    }
+
+    if (p.processor->queryInterface (Steinberg::Vst::IComponent::iid, (void**)&p.comp) != Steinberg::kResultTrue)
+        p.comp = nullptr;
+
+    if (p.comp)
+        p.comp->initialize (nullptr);
+
+    Steinberg::Vst::ProcessSetup setup = {};
+    setup.processMode = Steinberg::Vst::kRealtime;
+    setup.symbolicSampleSize = Steinberg::Vst::kSample32;
+    setup.maxSamplesPerBlock = 256;
+    setup.sampleRate = 48000.0;
+    p.processor->setupProcessing (setup);
+
+    if (p.comp)
+        p.comp->setActive (true);
+
+    return p;
+}
+
+static void releaseProcessor (Proc& p)
+{
+    if (p.comp)
+    {
+        p.comp->setActive (false);
+        p.comp->terminate ();
+        p.comp->release ();
+        p.comp = nullptr;
+    }
+    if (p.processor)
+    {
+        p.processor->release ();
+        p.processor = nullptr;
+    }
+}
 
 int main()
 {
@@ -243,6 +298,100 @@ int main()
     {
         std::cerr << "ERROR: VST3 plugin output was silent!\n";
         ++failures;
+    }
+
+    // Sample-accurate automation: a rotation change at offset 64 must take
+    // effect there, not at the start of the block and not at the end. Two
+    // identical processors are driven with the same audio and the same
+    // change at different offsets; their first 64 samples must match and
+    // everything from offset 64 on must differ.
+    {
+        const int NA = 256;
+        float a_l[NA] = {0}, a_r[NA] = {0}, b_l[NA] = {0}, b_r[NA] = {0};
+        float tone[NA];
+        for (int i = 0; i < NA; ++i)
+            tone[i] = sinf (2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
+
+        Proc pa = makeProcessor (factory);
+        Proc pb = makeProcessor (factory);
+
+        if (!pa.processor || !pb.processor)
+        {
+            std::cerr << "ERROR: could not create processors for the automation test\n";
+            ++failures;
+        }
+        else
+        {
+            DummyChanges changesA;
+            changesA.q.id = RotatingHrtf::kParamRotation;
+            changesA.q.val = 0.25;
+            changesA.q.pointOffset = 64;
+
+            DummyChanges changesB;
+            changesB.q.id = RotatingHrtf::kParamRotation;
+            changesB.q.val = 0.25;
+            changesB.q.pointOffset = 192;
+
+            float* inPtrsA[2] = { tone, tone };
+            float* outPtrsA[2] = { a_l, a_r };
+            Steinberg::Vst::AudioBusBuffers inBusA = {};
+            inBusA.numChannels = 2;
+            inBusA.channelBuffers32 = inPtrsA;
+            Steinberg::Vst::AudioBusBuffers outBusA = {};
+            outBusA.numChannels = 2;
+            outBusA.channelBuffers32 = outPtrsA;
+            Steinberg::Vst::ProcessData dataA = {};
+            dataA.processMode = Steinberg::Vst::kRealtime;
+            dataA.symbolicSampleSize = Steinberg::Vst::kSample32;
+            dataA.numSamples = NA;
+            dataA.numInputs = 1;
+            dataA.inputs = &inBusA;
+            dataA.numOutputs = 1;
+            dataA.outputs = &outBusA;
+            dataA.inputParameterChanges = &changesA;
+
+            float* inPtrsB[2] = { tone, tone };
+            float* outPtrsB[2] = { b_l, b_r };
+            Steinberg::Vst::AudioBusBuffers inBusB = {};
+            inBusB.numChannels = 2;
+            inBusB.channelBuffers32 = inPtrsB;
+            Steinberg::Vst::AudioBusBuffers outBusB = {};
+            outBusB.numChannels = 2;
+            outBusB.channelBuffers32 = outPtrsB;
+            Steinberg::Vst::ProcessData dataB = {};
+            dataB.processMode = Steinberg::Vst::kRealtime;
+            dataB.symbolicSampleSize = Steinberg::Vst::kSample32;
+            dataB.numSamples = NA;
+            dataB.numInputs = 1;
+            dataB.inputs = &inBusB;
+            dataB.numOutputs = 1;
+            dataB.outputs = &outBusB;
+            dataB.inputParameterChanges = &changesB;
+
+            pa.processor->process (dataA);
+            pb.processor->process (dataB);
+
+            const bool headEqual = memcmp (a_l, b_l, 64 * sizeof (float)) == 0;
+            const bool tailDiffers = memcmp (a_l + 64, b_l + 64, (NA - 64) * sizeof (float)) != 0;
+
+            if (!headEqual)
+            {
+                std::cerr << "ERROR: a parameter change at offset 64 or 192 affected the first 64 samples\n";
+                ++failures;
+            }
+            if (!tailDiffers)
+            {
+                std::cerr << "ERROR: parameter offsets were ignored - both blocks are identical\n";
+                ++failures;
+            }
+            else
+            {
+                std::cout << "SUCCESS: parameter changes are applied at their sample offset.\n";
+            }
+        }
+
+        releaseProcessor (pa);
+        releaseProcessor (pb);
     }
 
     // Regression: the VST3 spec allows null sample buffers when a bus is
