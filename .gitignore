@@ -1,0 +1,34 @@
+# ---------------------------------------------------------------
+# Build artefacts (produced by build_all.bat)
+# ---------------------------------------------------------------
+/build/
+/bundle/
+*.obj
+*.lib
+*.exp
+*.exe
+*.pdb
+*.ilk
+*.idb
+*.dll
+
+# Built plugin binaries (bundles under /bundle/ are covered above)
+*.clap
+*.vst3
+
+# ---------------------------------------------------------------
+# NTFS junction -> vst3_public_sdk submodule.
+# Ignored so the working tree is not traversed twice; it is
+# created per-machine with:  mklink /J public.sdk vst3_public_sdk
+# ---------------------------------------------------------------
+/public.sdk
+
+# ---------------------------------------------------------------
+# Editor / OS cruft
+# ---------------------------------------------------------------
+.vs/
+.vscode/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
