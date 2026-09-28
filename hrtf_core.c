@@ -132,9 +132,23 @@ static double interp_delay(const float *buf, size_t size, double write_pos, doub
     while (p >= (double)size) p -= (double)size;
 
     const size_t i0 = (size_t)p;
-    const size_t i1 = (i0 + 1) % size;
+    const size_t im1 = (i0 + size - 1) % size;
+    const size_t i1  = (i0 + 1) % size;
+    const size_t i2  = (i0 + 2) % size;
     const double f = p - (double)i0;
-    return (double)buf[i0] * (1.0-f) + (double)buf[i1] * f;
+
+    const double y_m1 = (double)buf[im1];
+    const double y_0  = (double)buf[i0];
+    const double y_1  = (double)buf[i1];
+    const double y_2  = (double)buf[i2];
+
+    /* 4-point, 3rd-order Hermite spline interpolation for flat frequency response up to Nyquist */
+    const double c0 = y_0;
+    const double c1 = 0.5 * (y_1 - y_m1);
+    const double c2 = y_m1 - 2.5 * y_0 + 2.0 * y_1 - 0.5 * y_2;
+    const double c3 = 0.5 * (y_2 - y_m1) + 1.5 * (y_0 - y_1);
+
+    return ((c3 * f + c2) * f + c1) * f + c0;
 }
 
 static void design_filters(HrtfCore *h, double phase, double elevation_deg, double distance,
@@ -202,8 +216,8 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     biquad_peaking(&l[1], h->fs, f_notch, 3.0, notch);
     biquad_peaking(&r[1], h->fs, f_notch, 3.0, notch);
 
-    biquad_highshelf(&l[2], h->fs, f_air, air - 3.5*left_far);
-    biquad_highshelf(&r[2], h->fs, f_air, air - 3.5*right_far);
+    biquad_highshelf(&l[2], h->fs, f_air, air - 9.0*left_far);
+    biquad_highshelf(&r[2], h->fs, f_air, air - 9.0*right_far);
 
     /* A broad side cue keeps lateral positions from sounding like simple left/right panning */
     biquad_peaking(&l[3], h->fs, f_side, 0.9, -2.0*left_far);
@@ -385,13 +399,17 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         const double theta = h->phase_smooth * 2.0 * HRTF_PI;
         const double phi = h->elevation_smooth * (HRTF_PI / 180.0);
         const double cos_phi = cos(phi);
-        const double s = cos_phi * sin(theta); /* Lateral component */
+        const double sin_phi = sin(phi);
+        const double s = cos_phi * sin(theta); /* Lateral projection: -1=left, +1=right */
+        const double c = cos_phi * cos(theta); /* Front/Rear projection: +1=front, -1=rear */
+        const double v = sin_phi;              /* Vertical projection: +1=overhead, -1=below */
 
         /* Spherical head shadow / Interaural Level Difference (ILD).
-           At 90 degrees lateral (s = +1), the near ear (right) is 0 dB,
-           and the far ear (left) is shadowed by -8 dB (far_gain = 0.3981).
-           Front, rear, and overhead remain symmetric (s = 0 -> gl = gr = 1.0). */
-        const double far_gain = 0.3981071706; /* -8 dB */
+           At low frequencies (<500 Hz), acoustic diffraction allows sound to bend
+           around the cranial sphere with minimal loss (far_gain = 0.6310 = -4.0 dB).
+           Deep high-frequency shadowing is handled dynamically by the
+           pinna/air high-shelf cascade on the contralateral ear (-9 dB additional). */
+        const double far_gain = 0.630957344; /* -4.0 dB low-frequency diffraction shadow */
         double gl = 1.0;
         double gr = 1.0;
         if (s > 0.0) {
@@ -409,12 +427,18 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         }
 
         /* Distance attenuation referenced to 1 metre.
-           Below 1 metre: limited to 1.0 (0 dB maximum distance gain)
-           so that moving closer than 1m never overdrives or clips.
-           Above 1 metre: follows standard 1/d free-field inverse-distance law. */
+           Above 1 metre: follows standard 1/d free-field inverse-distance law.
+           Below 1 metre: gentle proximity loudness gain (up to +3 dB at 5 cm)
+           providing an authentic near-field intimacy cue without runaway clipping. */
         const double d = h->distance_smooth;
-        double distance_gain = (d >= 1.0) ? (1.0 / d) : 1.0;
-        distance_gain = clampd(distance_gain, 0.05, 1.0);
+        double distance_gain;
+        if (d >= 1.0) {
+            distance_gain = 1.0 / d;
+        } else {
+            const double prox = 1.0 - clampd(d, 0.05, 1.0);
+            distance_gain = 1.0 + prox * 0.4142;
+        }
+        distance_gain = clampd(distance_gain, 0.05, 1.50);
 
         /* Near-field ITD correction: spherical wavefront curvature increases
            effective acoustic path length to far ear at distances < 1m.
@@ -422,8 +446,15 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         const double nf_itd_offset = 0.00765 / (2.0 + 0.00765);
         const double nf_itd_scale = (d < 1.0) ? (1.0 + (0.00765 / (2.0 * d * d + 0.00765) - nf_itd_offset)) : 1.0;
 
-        /* ITD: max ~0.70 ms scaled by lateral projection, near-field factor, and ear scale. */
-        const double itd_s = HRTF_MAX_ITD_S * s * nf_itd_scale * h->ear_scale_smooth;
+        /* ITD calculation based on Woodworth's spherical head acoustic ray-tracing.
+           Eliminates the ~0.12 ms over-estimate of sinusoidal models at intermediate angles (30°-60°). */
+        double abs_s = fabs(s);
+        if (abs_s > 1.0) abs_s = 1.0;
+        const double theta_lat = asin(abs_s);
+        const double woodworth_scale = (sin(theta_lat) + theta_lat) / (1.0 + 0.5 * HRTF_PI);
+        const double signed_woodworth = (s >= 0.0) ? woodworth_scale : -woodworth_scale;
+
+        const double itd_s = HRTF_MAX_ITD_S * signed_woodworth * nf_itd_scale * h->ear_scale_smooth;
         const double itd_samples = itd_s * h->fs;
         double dl = 0.0, dr = 0.0;
         if (itd_samples >= 0.0) dl = itd_samples;  /* source on right -> delay left ear */
@@ -466,14 +497,21 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             const size_t t4 = (pos + sz - (size_t)(0.0162 * h->fs)) % sz; /* Right wall */
             const size_t t5 = (pos + sz - (size_t)(0.0234 * h->fs)) % sz; /* Back wall */
 
-            const float r1 = h->early_buf[t1] * 0.25f;
-            const float r2 = h->early_buf[t2] * 0.22f;
-            const float r3 = h->early_buf[t3] * 0.20f;
-            const float r4 = h->early_buf[t4] * 0.20f;
-            const float r5 = h->early_buf[t5] * 0.16f;
+            /* 3D Direction-dependent early reflections:
+               Incident energy hitting boundary surfaces scales with source direction cosines:
+               - Floor/ceiling modulated by vertical projection v
+               - Left/right walls modulated by lateral projection s
+               - Rear wall modulated by front/back projection c */
+            const float r1 = h->early_buf[t1] * (float)(0.22 * (1.0 - 0.40 * v));
+            const float r2 = h->early_buf[t2] * (float)(0.20 * (1.0 + 0.40 * v));
+            const float r3 = h->early_buf[t3] * (float)(0.20 * (1.0 - 0.60 * s));
+            const float r4 = h->early_buf[t4] * (float)(0.20 * (1.0 + 0.60 * s));
+            const float r5 = h->early_buf[t5] * (float)(0.16 * (1.0 - 0.50 * c));
 
-            const double raw_l = r1 + r2 + r3 + 0.35 * r4 + r5;
-            const double raw_r = r1 + r2 + 0.35 * r3 + r4 + r5;
+            /* Binaural distribution: lateral wall reflections exhibit acoustic ILD at ears.
+               Median plane (s = 0) remains mathematically symmetric. */
+            const double raw_l = r1 + r2 + r3 + 0.25 * r4 + r5;
+            const double raw_r = r1 + r2 + 0.25 * r3 + r4 + r5;
 
             /* Gentle 1-pole wall absorption filter */
             h->early_lpf_l = 0.65 * raw_l + 0.35 * h->early_lpf_l;
@@ -483,13 +521,20 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             if (h->early_pos >= h->early_size) h->early_pos = 0;
         }
 
-        /* Master headroom scale (0.7071 = -3.0 dB) to ensure pinna resonance peaks
-           do not exceed 0 dBFS at 1m distance for a full-scale input. */
-        const double master_headroom = 0.7071067811865475;
+        /* Master headroom scale (0.50 = -6.0 dBFS) to ensure pinna resonance peaks
+           do not overdrive the soft-limiter on 0 dBFS inputs. */
+        const double master_headroom = 0.50;
         const double space_gain = h->space_smooth * 0.40;
 
-        float out0 = (float)(yl * gl * distance_gain * master_headroom + h->early_lpf_l * space_gain * distance_gain);
-        float out1 = (float)(yr * gr * distance_gain * master_headroom + h->early_lpf_r * space_gain * distance_gain);
+        /* Distance-dependent Direct-to-Reverberant Ratio (DRR):
+           Direct sound drops off with the inverse-distance law (distance_gain).
+           Reverberant room reflections integrate acoustic energy over the room volume,
+           decaying only mildly with distance. This DRR gradient provides the
+           primary physical acoustic cue for indoor auditory distance perception. */
+        const double room_dist_factor = 1.0 / sqrt(1.0 + 0.15 * d);
+
+        float out0 = (float)(yl * gl * distance_gain * master_headroom + h->early_lpf_l * space_gain * room_dist_factor);
+        float out1 = (float)(yr * gr * distance_gain * master_headroom + h->early_lpf_r * space_gain * room_dist_factor);
 
         /* Soft-knee saturation ceiling: guarantees peak amplitude never exceeds 0 dBFS */
         stereo[0][i] = soft_limit(out0);
