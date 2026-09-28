@@ -129,8 +129,10 @@ static double interp_delay(const float *buf, size_t size, double write_pos, doub
 {
     if (delay < 0.0) delay = 0.0;
 
-    /* For delays under 1 sample, the Hermite y_2 tap (i0 + 2) lands past
-       write_pos on unwritten/stale buffer data. Fall back to causal taps. */
+    /* While hrtf_process() always passes delay >= 2.0 (incorporating the 2-sample
+       PDC latency guard so all 4 Hermite taps remain strictly in the past of write_pos),
+       this fallback protects direct callers of interp_delay() with delay < 1.0 from
+       sampling unwritten/stale buffer data at tap i0 + 2. */
     if (delay < 1.0) {
         if (delay <= 0.0) return (double)buf[(size_t)write_pos];
         const size_t iw = (size_t)write_pos;
