@@ -2,7 +2,7 @@
 
 A high-performance, real-time 3D binaural spatialiser audio plugin built upon an acoustically calibrated Head-Related Transfer Function (HRTF) DSP core. It simulates spherical head acoustic shadow, interaural time delays, distance attenuation, near-field curvature divergence, anthropometric pinna and skull scaling, and room boundary reflections for headphones and stereo monitoring.
 
-Developed in pure C (DSP engine and CLAP wrapper) and modern C++17 (VST3 wrapper) with zero runtime dependencies and zero Python tooling.
+Developed in pure C (core DSP engine, CLAP plugin, standalone CLI generator, and dogfooding test harness) with a minimal C++17 VST3 wrapper strictly for Ableton Live compatibility. Strictly zero runtime dependencies and zero Python tooling.
 
 ---
 
@@ -275,11 +275,11 @@ build_all.bat
 ```
 This batch script will:
 1. Initialise the MSVC x64 developer environment via `vcvars64.bat`.
-2. Compile `RotatingHRTF_v2.clap`.
-3. Compile `RotatingHRTF_v2.vst3` and create the bundle directory structure.
-4. Compile and run `test_clap.exe` (all unit tests).
-5. Compile and run `test_vst3.exe` (all unit tests).
-6. Compile and run `build\generate_test_pulse.exe` (generating calibrated audio).
+2. Compile `RotatingHRTF_v2.clap` in pure C11.
+3. Compile `RotatingHRTF_v2.vst3` and create the bundle directory structure for Ableton Live.
+4. Compile and run `tools\generate_test_pulse.c` in pure C to synthesise `pulsed_pink_noise_48k.wav`.
+5. Compile and run `test_clap.exe` in pure C (dogfooding the generated audio and testing all parameters).
+6. Compile and run `test_vst3.exe` (VST3 host COM interface validation).
 7. Deploy the VST3 bundle to `C:\Program Files\Common Files\VST3\`.
 
 ---
