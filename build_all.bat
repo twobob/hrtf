@@ -83,7 +83,23 @@ copy /y RotatingHRTF_v2.vst3 "bundle\RotatingHRTF_v2.vst3\Contents\x86_64-win\Ro
 
 echo.
 echo ========================================================
-echo 3. Building and running automated tests...
+echo 3. Building pure C test pulse generator tool and generating test audio...
+echo ========================================================
+
+cl.exe /nologo /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:build\generate_test_pulse.exe
+if !errorlevel! neq 0 (
+    echo ERROR: Failed to build generate_test_pulse.exe!
+    exit /b 1
+)
+build\generate_test_pulse.exe
+if !errorlevel! neq 0 (
+    echo ERROR: generate_test_pulse.exe reported failures!
+    exit /b 1
+)
+
+echo.
+echo ========================================================
+echo 4. Building and running automated tests (dogfooding generated test audio)...
 echo ========================================================
 
 cl.exe /nologo /O2 /Iclap-src\include test_clap.c /Fo:build\ /Fe:test_clap.exe
@@ -105,22 +121,6 @@ if !errorlevel! neq 0 (
 test_vst3.exe
 if !errorlevel! neq 0 (
     echo ERROR: test_vst3.exe reported failures!
-    exit /b 1
-)
-
-echo.
-echo ========================================================
-echo 4. Building pure C test pulse generator tool...
-echo ========================================================
-
-cl.exe /nologo /O2 /I. tools\generate_test_pulse.c hrtf_core.c /Fo:build\ /Fe:build\generate_test_pulse.exe
-if !errorlevel! neq 0 (
-    echo ERROR: Failed to build generate_test_pulse.exe!
-    exit /b 1
-)
-build\generate_test_pulse.exe
-if !errorlevel! neq 0 (
-    echo ERROR: generate_test_pulse.exe reported failures!
     exit /b 1
 )
 

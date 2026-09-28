@@ -64,10 +64,96 @@ static void flush_param(const clap_plugin_t *plugin, const clap_plugin_params_t 
     params->flush(plugin, &list, NULL);
 }
 
+#pragma pack(push, 1)
+typedef struct {
+    char     riff_id[4];
+    uint32_t riff_size;
+    char     wave_id[4];
+} RiffHeader;
+
+typedef struct {
+    char     chunk_id[4];
+    uint32_t chunk_size;
+} ChunkHeader;
+
+typedef struct {
+    uint16_t audio_format;
+    uint16_t num_channels;
+    uint32_t sample_rate;
+    uint32_t byte_rate;
+    uint16_t block_align;
+    uint16_t bits_per_sample;
+} FmtChunk;
+#pragma pack(pop)
+
+static int load_test_wav(const char *filename, float *buffer, size_t max_samples, size_t *out_samples)
+{
+    FILE *f = fopen(filename, "rb");
+    if (!f) return 0;
+
+    RiffHeader riff;
+    if (fread(&riff, sizeof(riff), 1, f) != 1 ||
+        memcmp(riff.riff_id, "RIFF", 4) != 0 ||
+        memcmp(riff.wave_id, "WAVE", 4) != 0) {
+        fclose(f);
+        return 0;
+    }
+
+    FmtChunk fmt;
+    memset(&fmt, 0, sizeof(fmt));
+    int has_fmt = 0;
+    size_t samples_read = 0;
+
+    while (!feof(f)) {
+        ChunkHeader ch;
+        if (fread(&ch, sizeof(ch), 1, f) != 1) break;
+
+        if (memcmp(ch.chunk_id, "fmt ", 4) == 0) {
+            size_t to_read = ch.chunk_size < sizeof(fmt) ? ch.chunk_size : sizeof(fmt);
+            if (fread(&fmt, to_read, 1, f) != 1) { fclose(f); return 0; }
+            if (ch.chunk_size > to_read) fseek(f, (long)(ch.chunk_size - to_read), SEEK_CUR);
+            has_fmt = 1;
+        } else if (memcmp(ch.chunk_id, "data", 4) == 0) {
+            if (!has_fmt || fmt.num_channels != 1 || (fmt.bits_per_sample != 24 && fmt.bits_per_sample != 16)) {
+                fclose(f);
+                return 0;
+            }
+
+            size_t bytes_per_sample = fmt.bits_per_sample / 8;
+            size_t total_samples = ch.chunk_size / bytes_per_sample;
+            size_t count = total_samples < max_samples ? total_samples : max_samples;
+
+            for (size_t i = 0; i < count; ++i) {
+                if (bytes_per_sample == 3) {
+                    uint8_t b[3];
+                    if (fread(b, 1, 3, f) != 3) break;
+                    int32_t val = (int32_t)(b[0] | (b[1] << 8) | (b[2] << 16));
+                    if (val & 0x800000) val |= 0xFF000000;
+                    buffer[i] = (float)val / 8388608.0f;
+                } else if (bytes_per_sample == 2) {
+                    int16_t val;
+                    if (fread(&val, 2, 1, f) != 1) break;
+                    buffer[i] = (float)val / 32768.0f;
+                }
+                samples_read++;
+            }
+            break;
+        } else {
+            fseek(f, (long)ch.chunk_size, SEEK_CUR);
+        }
+    }
+
+    fclose(f);
+    if (out_samples) *out_samples = samples_read;
+    return samples_read > 0 ? 1 : 0;
+}
+
 int main(void) {
     /* Fail the build without popping up a crash dialog if this harness
        ever faults: the exit code is what the build script reads. */
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
+    int failures = 0;
 
     printf("Loading RotatingHRTF_v2.clap...\n");
     HMODULE lib = LoadLibraryA("RotatingHRTF_v2.clap");
@@ -139,13 +225,23 @@ int main(void) {
         return 1;
     }
 
-    // Prepare 256 frames of 440 Hz test tone
+    // Dogfood generated test pulse audio file: load pulsed_pink_noise_48k.wav
     const uint32_t N = 256;
+    float wav_buf[4096] = {0};
+    size_t wav_count = 0;
+    int loaded = load_test_wav("pulsed_pink_noise_48k.wav", wav_buf, 4096, &wav_count);
+    if (!loaded || wav_count < 256) {
+        printf("ERROR: Failed to load generated test pulse WAV file 'pulsed_pink_noise_48k.wav'\n");
+        ++failures;
+    } else {
+        printf("SUCCESS: Loaded generated test pulse WAV file 'pulsed_pink_noise_48k.wav' (%zu samples).\n", wav_count);
+    }
+
     float in_buf[256];
     float out_l[256] = {0};
     float out_r[256] = {0};
     for (uint32_t i = 0; i < N; ++i) {
-        in_buf[i] = sinf(2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
+        in_buf[i] = (loaded && (size_t)(i + 100) < wav_count) ? wav_buf[i + 100] : sinf(2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
     }
 
     float *in_ptrs[1] = { in_buf };
@@ -176,8 +272,6 @@ int main(void) {
         .in_events = NULL,
         .out_events = NULL
     };
-
-    int failures = 0;
 
     clap_process_status status = plugin->process(plugin, &process);
     printf("Process status: %d (CLAP_PROCESS_CONTINUE = %d)\n", status, CLAP_PROCESS_CONTINUE);
@@ -376,15 +470,57 @@ int main(void) {
                 out_l[i] = 0.0f;
                 out_r[i] = 0.0f;
             }
+            flush_param(plugin, params, 5, 1.0); /* Enable Test Pulse */
+            flush_param(plugin, params, 6, 0.5); /* 50% pink noise */
             plugin->process(plugin, &process);
             float pulse_sum = 0.0f;
             for (uint32_t i = 0; i < N; ++i) {
                 pulse_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
             }
             if (pulse_sum > 0.01f) {
-                printf("SUCCESS: Test pulse generator synthesised audio from silent input.\n");
+                printf("SUCCESS: Test pulse generator synthesised audio from silent input (sum=%f).\n", pulse_sum);
             } else {
                 printf("ERROR: Test pulse generator failed to synthesise audio (sum=%f)\n", pulse_sum);
+                ++failures;
+            }
+
+            /* Dogfood internal test pulse through 3D rotation: rotate to 90 deg right */
+            flush_param(plugin, params, 2, 0.25);
+            for (int b = 0; b < 6; ++b) {
+                plugin->process(plugin, &process);
+            }
+            float rot_pulse_l = 0.0f, rot_pulse_r = 0.0f;
+            for (uint32_t i = 0; i < N; ++i) {
+                rot_pulse_l += fabsf(out_l[i]);
+                rot_pulse_r += fabsf(out_r[i]);
+            }
+            if (rot_pulse_r > rot_pulse_l * 1.3f) {
+                printf("SUCCESS: Dogfooded internal test pulse through 3D rotation (Left=%f, Right=%f).\n",
+                       rot_pulse_l, rot_pulse_r);
+            } else {
+                printf("ERROR: Internal test pulse did not bias right ear (Left=%f, Right=%f)\n",
+                       rot_pulse_l, rot_pulse_r);
+                ++failures;
+            }
+
+            /* Dogfood internal test pulse tone morphing: rumble vs crisp */
+            flush_param(plugin, params, 2, 0.0); /* centre */
+            flush_param(plugin, params, 6, 0.0); /* sub rumble */
+            for (int b = 0; b < 4; ++b) plugin->process(plugin, &process);
+            float rumble_sum = 0.0f;
+            for (uint32_t i = 0; i < N; ++i) rumble_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+
+            flush_param(plugin, params, 6, 1.0); /* crisp transient */
+            for (int b = 0; b < 4; ++b) plugin->process(plugin, &process);
+            float crisp_sum = 0.0f;
+            for (uint32_t i = 0; i < N; ++i) crisp_sum += fabsf(out_l[i]) + fabsf(out_r[i]);
+
+            if (fabsf(rumble_sum - crisp_sum) > 0.01f) {
+                printf("SUCCESS: Dogfooded internal test tone spectrum shift (rumble=%f, crisp=%f).\n",
+                       rumble_sum, crisp_sum);
+            } else {
+                printf("ERROR: Test tone did not alter internal pulse spectrum (rumble=%f, crisp=%f)\n",
+                       rumble_sum, crisp_sum);
                 ++failures;
             }
         }
