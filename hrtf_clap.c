@@ -6,6 +6,7 @@
 #include <clap/ext/audio-ports.h>
 #include <clap/ext/params.h>
 #include <clap/ext/state.h>
+#include <clap/ext/latency.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdbool.h>
@@ -861,6 +862,18 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     return CLAP_PROCESS_CONTINUE;
 }
 
+/* ------------------------------ latency ------------------------------ */
+
+static uint32_t latency_get(const clap_plugin_t *plugin)
+{
+    (void)plugin;
+    return 2u; /* 2-sample delay line read guard */
+}
+
+static const clap_plugin_latency_t latency_ext = {
+    .get = latency_get
+};
+
 /* ------------------------------ extension dispatch ------------------------------ */
 
 static const void *plugin_get_extension(const clap_plugin_t *plugin,
@@ -872,6 +885,7 @@ static const void *plugin_get_extension(const clap_plugin_t *plugin,
     if (strcmp(id, CLAP_EXT_AUDIO_PORTS) == 0) return &audio_ports_ext;
     if (strcmp(id, CLAP_EXT_PARAMS) == 0) return &params_ext;
     if (strcmp(id, CLAP_EXT_STATE) == 0) return &state_ext;
+    if (strcmp(id, CLAP_EXT_LATENCY) == 0) return &latency_ext;
 
     return NULL;
 }

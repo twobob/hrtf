@@ -5,6 +5,7 @@
 #include "pluginterfaces/vst/ivstprocesscontext.h"
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace RotatingHrtf {
 
@@ -182,7 +183,11 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 {
     /* Parameter changes are honoured at the sample offset the host asked
        for, not applied to the whole block from its first sample. */
-    constexpr Steinberg::int32 kMaxQueues = 32;
+    /* Parameter changes are honoured at the sample offset the host asked
+       for, not applied to the whole block from its first sample.
+       Fixed stack array of 64 queues accommodates >9x the plugin's 7 parameters
+       with zero heap allocation on the audio thread. */
+    constexpr Steinberg::int32 kMaxQueues = 64;
     Steinberg::Vst::IParamValueQueue* queues[kMaxQueues] = {};
     Steinberg::int32 consumed[kMaxQueues] = {};
     Steinberg::int32 numQueues = 0;
