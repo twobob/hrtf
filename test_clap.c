@@ -5,6 +5,10 @@
 #include <clap/clap.h>
 
 int main(void) {
+    /* Fail the build without popping up a crash dialog if this harness
+       ever faults: the exit code is what the build script reads. */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
     printf("Loading RotatingHRTF_v2.clap...\n");
     HMODULE lib = LoadLibraryA("RotatingHRTF_v2.clap");
     if (!lib) {

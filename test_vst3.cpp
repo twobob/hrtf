@@ -45,6 +45,10 @@ int main()
 {
     int failures = 0;
 
+    /* Fail the build without popping up a crash dialog if this harness
+       ever faults: the exit code is what the build script reads. */
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+
     std::cout << "Loading RotatingHRTF_v2.vst3...\n";
     HMODULE lib = LoadLibraryA("RotatingHRTF_v2.vst3");
     if (!lib)
@@ -239,6 +243,46 @@ int main()
     {
         std::cerr << "ERROR: VST3 plugin output was silent!\n";
         ++failures;
+    }
+
+    // Regression: the VST3 spec allows null sample buffers when a bus is
+    // inactive. process() used to dereference them and take the host down.
+    {
+        Steinberg::Vst::AudioBusBuffers nullOut = {};
+        nullOut.numChannels = 2;
+        nullOut.channelBuffers32 = nullptr;
+
+        Steinberg::Vst::ProcessData nullOutData = processData;
+        nullOutData.outputs = &nullOut;
+
+        res = processor->process(nullOutData);
+        if (res != Steinberg::kResultOk)
+        {
+            std::cerr << "ERROR: process() with null output buffers returned " << res << ", expected kResultOk!\n";
+            ++failures;
+        }
+        else
+        {
+            std::cout << "SUCCESS: process() survived null output buffers.\n";
+        }
+
+        Steinberg::Vst::AudioBusBuffers nullIn = {};
+        nullIn.numChannels = 2;
+        nullIn.channelBuffers32 = nullptr;
+
+        Steinberg::Vst::ProcessData nullInData = processData;
+        nullInData.inputs = &nullIn;
+
+        res = processor->process(nullInData);
+        if (res != Steinberg::kResultOk)
+        {
+            std::cerr << "ERROR: process() with a null input buffer array returned " << res << ", expected kResultOk!\n";
+            ++failures;
+        }
+        else
+        {
+            std::cout << "SUCCESS: process() survived a null input buffer array.\n";
+        }
     }
 
     if (comp)
