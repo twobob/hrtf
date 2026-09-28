@@ -95,14 +95,69 @@ static int write_wav_file(const char *filename, const float *samples, size_t num
     return 1;
 }
 
+static void print_usage(const char *prog_name)
+{
+    printf("Rotating HRTF Test Pulse Generator (Pure C CLI)\n");
+    printf("Synthesises calibrated test signals for 3D HRTF spatialisation benchmarking.\n\n");
+    printf("Usage: %s [options]\n\n", prog_name);
+    printf("Options:\n");
+    printf("  -o, --output <path>       Output WAV file path (default writes to standard test files)\n");
+    printf("  -t, --tone <0.0..1.0>     Tone morphing: 0.0=low rumble, 0.5=pink noise, 1.0=crisp transient (default: 0.5)\n");
+    printf("  -m, --mode <mode>         Signal mode: noise, sine, click (default: noise)\n");
+    printf("  -f, --freq <Hz>           Sine test frequency in Hz (default: 1000.0)\n");
+    printf("  -b, --bpm <BPM>           Tempo in beats per minute (default: 120.0)\n");
+    printf("  -n, --beats <count>       Total number of beats to synthesise (default: 8)\n");
+    printf("  -d, --dur <ms>            Pulse duration in milliseconds (default: 200.0)\n");
+    printf("  -s, --samplerate <Hz>     Audio sample rate in Hz (default: 48000)\n");
+    printf("  -h, --help                Display this help message and exit\n");
+}
+
 int main(int argc, char **argv)
 {
-    (void)argc;
-    (void)argv;
+    const char *output_file = NULL;
+    double tone = 0.5;
+    int mode = HRTF_TEST_MODE_NOISE;
+    double freq_hz = 1000.0;
+    double bpm = 120.0;
+    int total_beats = 8;
+    double dur_ms = 200.0;
+    uint32_t fs = 48000;
 
-    const uint32_t fs = 48000;
-    const double bpm = 120.0;
-    const int total_beats = 8; /* 2 bars of 4/4 */
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else if ((strcmp(argv[i], "-o") == 0 || strcmp(argv[i], "--output") == 0) && i + 1 < argc) {
+            output_file = argv[++i];
+        } else if ((strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--tone") == 0) && i + 1 < argc) {
+            tone = atof(argv[++i]);
+        } else if ((strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--mode") == 0) && i + 1 < argc) {
+            const char *m = argv[++i];
+            if (_stricmp(m, "sine") == 0) mode = HRTF_TEST_MODE_SINE;
+            else if (_stricmp(m, "click") == 0) mode = HRTF_TEST_MODE_CLICK;
+            else mode = HRTF_TEST_MODE_NOISE;
+        } else if ((strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--freq") == 0) && i + 1 < argc) {
+            freq_hz = atof(argv[++i]);
+        } else if ((strcmp(argv[i], "-b") == 0 || strcmp(argv[i], "--bpm") == 0) && i + 1 < argc) {
+            bpm = atof(argv[++i]);
+        } else if ((strcmp(argv[i], "-n") == 0 || strcmp(argv[i], "--beats") == 0) && i + 1 < argc) {
+            total_beats = atoi(argv[++i]);
+        } else if ((strcmp(argv[i], "-d") == 0 || strcmp(argv[i], "--dur") == 0) && i + 1 < argc) {
+            dur_ms = atof(argv[++i]);
+        } else if ((strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--samplerate") == 0) && i + 1 < argc) {
+            fs = (uint32_t)atoi(argv[++i]);
+        } else {
+            fprintf(stderr, "Unknown or incomplete option: %s\n", argv[i]);
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (fs < 8000 || fs > 192000) fs = 48000;
+    if (bpm < 20.0 || bpm > 400.0) bpm = 120.0;
+    if (total_beats < 1 || total_beats > 128) total_beats = 8;
+    if (dur_ms < 1.0 || dur_ms > 2000.0) dur_ms = 200.0;
+
     const double total_seconds = (double)total_beats * (60.0 / bpm);
     const size_t total_samples = (size_t)(total_seconds * fs);
 
@@ -115,6 +170,10 @@ int main(int argc, char **argv)
     /* Initialise test generator from hrtf_core */
     HrtfTestGen gen;
     hrtf_test_gen_init(&gen, fs);
+    hrtf_test_gen_set_tone(&gen, tone);
+    hrtf_test_gen_set_mode(&gen, mode);
+    hrtf_test_gen_set_frequency(&gen, freq_hz);
+    hrtf_test_gen_set_duration(&gen, dur_ms / 1000.0);
 
     /* Synthesise audio in blocks */
     const size_t block_size = 256;
@@ -132,10 +191,15 @@ int main(int argc, char **argv)
         cursor += chunk;
     }
 
-    int ok1 = write_wav_file("pulsed_pink_noise_48k.wav", buffer, total_samples, fs);
-    int ok2 = write_wav_file("test_signals/pulsed_pink_noise_48k.wav", buffer, total_samples, fs);
+    int ok = 1;
+    if (output_file) {
+        ok = write_wav_file(output_file, buffer, total_samples, fs);
+    } else {
+        int ok1 = write_wav_file("pulsed_pink_noise_48k.wav", buffer, total_samples, fs);
+        int ok2 = write_wav_file("test_signals/pulsed_pink_noise_48k.wav", buffer, total_samples, fs);
+        ok = ok1 && ok2;
+    }
 
     free(buffer);
-
-    return (ok1 && ok2) ? 0 : 1;
+    return ok ? 0 : 1;
 }

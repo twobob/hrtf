@@ -47,6 +47,20 @@ Steinberg::tresult PLUGIN_API PlugController::initialize (Steinberg::FUnknown* c
         Steinberg::Vst::ParameterInfo::kCanAutomate);
     parameters.addParameter (pulseParam);
 
+    // Test Tone parameter: 0.0 % to 100.0 %, default 50.0 % (0 = low rumble, 50 = pink noise, 100 = crisp transient)
+    auto* toneParam = new Steinberg::Vst::RangeParameter (
+        STR16 ("Test Tone"), kParamTestTone, STR16 ("%"),
+        0.0, 100.0, 50.0, 0,
+        Steinberg::Vst::ParameterInfo::kCanAutomate);
+    parameters.addParameter (toneParam);
+
+    // Ear Scale (Anthropometric Pinna/Head Scaling) parameter: 70.0 % to 130.0 %, default 100.0 %
+    auto* earParam = new Steinberg::Vst::RangeParameter (
+        STR16 ("Ear Scale"), kParamEarScale, STR16 ("%"),
+        70.0, 130.0, 100.0, 0,
+        Steinberg::Vst::ParameterInfo::kCanAutomate);
+    parameters.addParameter (earParam);
+
     return Steinberg::kResultTrue;
 }
 
@@ -57,7 +71,7 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != 2 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
@@ -87,6 +101,18 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
         if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
             setParamNormalized (kParamTestPulse, pNorm);
+    }
+
+    if (version >= 4)
+    {
+        double tNorm = 0.5, esNorm = 0.5;
+        if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
+        if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
+
+        if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
+            setParamNormalized (kParamTestTone, tNorm);
+        if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
+            setParamNormalized (kParamEarScale, esNorm);
     }
 
     return Steinberg::kResultOk;

@@ -67,6 +67,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setupProcessing (Steinberg::Vst::Pr
     mSampleRate = setup.sampleRate;
     mMonoBuffer.resize (setup.maxSamplesPerBlock > 0 ? setup.maxSamplesPerBlock : 1024);
     hrtf_test_gen_init (&mTestGen, mSampleRate);
+    hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm);
     return AudioEffect::setupProcessing (setup);
 }
 
@@ -84,10 +85,12 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
         if (mCore)
         {
             double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
+            double ear_scale = 0.70 + mEarScaleNorm * 0.60;
             hrtf_set_distance (mCore, dist_m);
             hrtf_set_rotation_phase (mCore, mRotationNorm);
             hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
             hrtf_set_space (mCore, mSpaceNorm);
+            hrtf_set_ear_scale (mCore, ear_scale);
             hrtf_reset (mCore);
         }
     }
@@ -161,6 +164,17 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
     else if (id == kParamTestPulse)
     {
         mTestPulseNorm = value;
+    }
+    else if (id == kParamTestTone)
+    {
+        mTestToneNorm = value;
+        hrtf_test_gen_set_tone (&mTestGen, value);
+    }
+    else if (id == kParamEarScale)
+    {
+        mEarScaleNorm = value;
+        if (mCore)
+            hrtf_set_ear_scale (mCore, 0.70 + value * 0.60);
     }
 }
 
@@ -319,7 +333,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != 2 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return Steinberg::kResultFalse;
 
     double dNorm = 0.0, rNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
@@ -353,13 +367,30 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
             mTestPulseNorm = pNorm;
     }
 
+    if (version >= 4)
+    {
+        double tNorm = 0.5, esNorm = 0.5;
+        if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
+        if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
+
+        if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
+        {
+            mTestToneNorm = tNorm;
+            hrtf_test_gen_set_tone (&mTestGen, tNorm);
+        }
+        if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
+            mEarScaleNorm = esNorm;
+    }
+
     if (mCore)
     {
         double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
+        double ear_scale = 0.70 + mEarScaleNorm * 0.60;
         hrtf_set_distance (mCore, dist_m);
         hrtf_set_rotation_phase (mCore, mRotationNorm);
         hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
         hrtf_set_space (mCore, mSpaceNorm);
+        hrtf_set_ear_scale (mCore, ear_scale);
     }
 
     return Steinberg::kResultOk;
@@ -376,6 +407,8 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     streamer.writeDouble (mElevationNorm);
     streamer.writeDouble (mSpaceNorm);
     streamer.writeDouble (mTestPulseNorm);
+    streamer.writeDouble (mTestToneNorm);
+    streamer.writeDouble (mEarScaleNorm);
 
     return Steinberg::kResultOk;
 }

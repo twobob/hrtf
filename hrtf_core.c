@@ -24,6 +24,8 @@ struct HrtfCore {
     double distance_smooth;
     double elevation_smooth;
     double space_smooth;
+    double ear_scale;
+    double ear_scale_smooth;
 
     float *delay_l;
     float *delay_r;
@@ -140,7 +142,7 @@ static double interp_delay(const float *buf, size_t size, double write_pos, doub
 }
 
 static void design_filters(HrtfCore *h, double phase, double elevation_deg, double distance,
-                           Biquad *l, Biquad *r)
+                           double ear_scale, Biquad *l, Biquad *r)
 {
     /* Spherical coordinate conventions:
        phase [0, 1): 0.00 = front, 0.25 = right, 0.50 = rear, 0.75 = left.
@@ -169,9 +171,16 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     /* Graph-derived front presence around 3-5 kHz, reduced overhead/below */
     const double presence = 9.0 * front + 1.0 * rear + 1.5 * near - 3.0 * fabs(v);
 
+    /* Anthropometric ear scaling:
+       scale < 1.0 (smaller head/ears) shifts resonance and notch frequencies higher.
+       scale > 1.0 (larger head/ears) shifts resonance and notch frequencies lower. */
+    const double scale = clampd(ear_scale, 0.70, 1.30);
+    const double inv_scale = 1.0 / scale;
+
     /* Dynamic elevation concha notch:
-       Median plane notch shifts from ~4.5 kHz (below) up to ~9.5 kHz (overhead). */
-    const double f_notch = clampd(6500.0 + 3000.0 * v, 4200.0, 11000.0);
+       Median plane notch shifts from ~4.5 kHz (below) up to ~9.5 kHz (overhead),
+       scaled by anthropometric ear dimensions. */
+    const double f_notch = clampd((6500.0 + 3000.0 * v) * inv_scale, 3000.0, 15000.0);
     const double notch = -4.0 * rear - 3.5 * clampd(-v, 0.0, 1.0);
 
     /* High-frequency air falls towards rear, and undergoes cranial shadow from overhead. */
@@ -183,19 +192,23 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     const double left_far  = clampd(s, 0.0, 1.0);
     const double right_far = clampd(-s, 0.0, 1.0);
 
-    biquad_peaking(&l[0], h->fs, 3900.0, 0.85, presence);
-    biquad_peaking(&r[0], h->fs, 3900.0, 0.85, presence);
+    const double f_presence = clampd(3900.0 * inv_scale, 1500.0, 7500.0);
+    const double f_air = clampd(8500.0 * inv_scale, 4000.0, 18000.0);
+    const double f_side = clampd(2200.0 * inv_scale, 1000.0, 4500.0);
+    const double f_nf = clampd(350.0 * inv_scale, 150.0, 800.0);
+
+    biquad_peaking(&l[0], h->fs, f_presence, 0.85, presence);
+    biquad_peaking(&r[0], h->fs, f_presence, 0.85, presence);
 
     biquad_peaking(&l[1], h->fs, f_notch, 3.0, notch);
     biquad_peaking(&r[1], h->fs, f_notch, 3.0, notch);
 
-    biquad_highshelf(&l[2], h->fs, 8500.0, air - 3.5*left_far);
-    biquad_highshelf(&r[2], h->fs, 8500.0, air - 3.5*right_far);
+    biquad_highshelf(&l[2], h->fs, f_air, air - 3.5*left_far);
+    biquad_highshelf(&r[2], h->fs, f_air, air - 3.5*right_far);
 
-    /* A broad 2.2 kHz side cue keeps lateral positions from sounding like
-       simple left/right gain panning. */
-    biquad_peaking(&l[3], h->fs, 2200.0, 0.9, -2.0*left_far);
-    biquad_peaking(&r[3], h->fs, 2200.0, 0.9, -2.0*right_far);
+    /* A broad side cue keeps lateral positions from sounding like simple left/right panning */
+    biquad_peaking(&l[3], h->fs, f_side, 0.9, -2.0*left_far);
+    biquad_peaking(&r[3], h->fs, f_side, 0.9, -2.0*right_far);
 
     /* Near-field low-frequency ILD divergence (Distance Variation Function / DVF).
        In the near field (d < 1.0 m), spherical wavefront curvature produces significant
@@ -214,8 +227,8 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
             nf_gain_r = -0.5 * nf_ild;
         }
     }
-    biquad_lowshelf(&l[4], h->fs, 350.0, nf_gain_l);
-    biquad_lowshelf(&r[4], h->fs, 350.0, nf_gain_r);
+    biquad_lowshelf(&l[4], h->fs, f_nf, nf_gain_l);
+    biquad_lowshelf(&r[4], h->fs, f_nf, nf_gain_r);
 }
 
 HrtfCore *hrtf_create(double sample_rate, size_t max_block)
@@ -231,8 +244,9 @@ HrtfCore *hrtf_create(double sample_rate, size_t max_block)
     h->phase = h->phase_smooth = 0.0;
     h->elevation_deg = h->elevation_smooth = 0.0;
     h->space = h->space_smooth = 0.15; /* 15% default room externalisation */
+    h->ear_scale = h->ear_scale_smooth = 1.0; /* 100% standard anthropometric scale */
 
-    size_t needed = (size_t)ceil(sample_rate * HRTF_MAX_ITD_S) + 4;
+    size_t needed = (size_t)ceil(sample_rate * HRTF_MAX_ITD_S * 1.5) + 8;
     if (needed < 16) needed = 16;
     if (needed > HRTF_MAX_DELAY_SAMPLES * 4) needed = HRTF_MAX_DELAY_SAMPLES * 4;
     h->delay_size = needed;
@@ -285,6 +299,7 @@ void hrtf_reset(HrtfCore *h)
     h->distance_smooth = clampd(h->distance_m, 0.05, 20.0);
     h->elevation_smooth = clampd(h->elevation_deg, -90.0, 90.0);
     h->space_smooth = clampd(h->space, 0.0, 1.0);
+    h->ear_scale_smooth = clampd(h->ear_scale, 0.70, 1.30);
     h->last_phase = h->phase_smooth;
     h->last_distance = h->distance_smooth;
 }
@@ -315,6 +330,12 @@ void hrtf_set_space(HrtfCore *h, double space_01)
     h->space = clampd(space_01, 0.0, 1.0);
 }
 
+void hrtf_set_ear_scale(HrtfCore *h, double scale)
+{
+    if (!h || !isfinite(scale)) return;
+    h->ear_scale = clampd(scale, 0.70, 1.30);
+}
+
 static inline float soft_limit(float x)
 {
     const float T = 0.89125f; /* -1.0 dBFS linear threshold */
@@ -336,11 +357,13 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
     if (!isfinite(h->distance_smooth)) h->distance_smooth = 2.0;
     if (!isfinite(h->elevation_smooth)) h->elevation_smooth = 0.0;
     if (!isfinite(h->space_smooth)) h->space_smooth = 0.15;
+    if (!isfinite(h->ear_scale_smooth)) h->ear_scale_smooth = 1.0;
 
     const double param_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms */
     const double distance_slew = exp(-1.0 / (0.050 * h->fs)); /* 50 ms */
     const double elev_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms */
     const double space_slew = exp(-1.0 / (0.030 * h->fs)); /* 30 ms */
+    const double ear_scale_slew = exp(-1.0 / (0.040 * h->fs)); /* 40 ms */
 
     for (size_t i=0; i<n; ++i) {
         double dp = h->phase - h->phase_smooth;
@@ -356,6 +379,9 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 
         h->space_smooth += (1.0-space_slew) *
                            (h->space - h->space_smooth);
+
+        h->ear_scale_smooth += (1.0-ear_scale_slew) *
+                               (h->ear_scale - h->ear_scale_smooth);
 
         const double theta = h->phase_smooth * 2.0 * HRTF_PI;
         const double phi = h->elevation_smooth * (HRTF_PI / 180.0);
@@ -395,8 +421,8 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
            effective acoustic path length to far ear at distances < 1m. */
         const double nf_itd_scale = (d < 1.0) ? (1.0 + 0.00765 / (2.0 * d * d + 0.00765)) : 1.0;
 
-        /* ITD: max ~0.70 ms scaled by lateral projection and near-field factor. */
-        const double itd_s = HRTF_MAX_ITD_S * s * nf_itd_scale;
+        /* ITD: max ~0.70 ms scaled by lateral projection, near-field factor, and ear scale. */
+        const double itd_s = HRTF_MAX_ITD_S * s * nf_itd_scale * h->ear_scale_smooth;
         const double itd_samples = itd_s * h->fs;
         double dl = 0.0, dr = 0.0;
         if (itd_samples >= 0.0) dl = itd_samples;  /* source on right -> delay left ear */
@@ -415,7 +441,8 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
            smoother runs at audio rate; 16-sample coefficient updates keep
            zippering negligible while avoiding per-sample trig/coefficient work. */
         if ((i & 15u) == 0u) {
-            design_filters(h, h->phase_smooth, h->elevation_smooth, h->distance_smooth, h->l, h->r);
+            design_filters(h, h->phase_smooth, h->elevation_smooth, h->distance_smooth,
+                           h->ear_scale_smooth, h->l, h->r);
         }
 
         double yl = xl;
@@ -473,7 +500,7 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 }
 
 /* -------------------------------------------------------------------------
-   Test Signal Generator: 200 ms 1/f Pink Noise Bursts on Each Beat
+   Test Signal Generator: Calibrated Pulses, Pink Noise, Sine & Dirac Clicks
    ------------------------------------------------------------------------- */
 
 void hrtf_test_gen_init(HrtfTestGen *gen, double sample_rate)
@@ -482,6 +509,35 @@ void hrtf_test_gen_init(HrtfTestGen *gen, double sample_rate)
     memset(gen, 0, sizeof(*gen));
     gen->sample_rate = sample_rate > 1000.0 ? sample_rate : 48000.0;
     gen->prng_state = 0x5A17F00Du;
+    gen->tone = 0.5; /* Default: balanced pink noise */
+    gen->mode = HRTF_TEST_MODE_NOISE;
+    gen->freq_hz = 1000.0;
+    gen->pulse_dur_s = 0.200;
+}
+
+void hrtf_test_gen_set_tone(HrtfTestGen *gen, double tone)
+{
+    if (!gen || !isfinite(tone)) return;
+    gen->tone = clampd(tone, 0.0, 1.0);
+}
+
+void hrtf_test_gen_set_mode(HrtfTestGen *gen, int mode)
+{
+    if (!gen) return;
+    if (mode < 0 || mode > 2) mode = HRTF_TEST_MODE_NOISE;
+    gen->mode = mode;
+}
+
+void hrtf_test_gen_set_frequency(HrtfTestGen *gen, double freq_hz)
+{
+    if (!gen || !isfinite(freq_hz)) return;
+    gen->freq_hz = clampd(freq_hz, 20.0, 20000.0);
+}
+
+void hrtf_test_gen_set_duration(HrtfTestGen *gen, double dur_s)
+{
+    if (!gen || !isfinite(dur_s)) return;
+    gen->pulse_dur_s = clampd(dur_s, 0.001, 2.0);
 }
 
 void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double bpm, double beat_pos, int is_playing)
@@ -495,28 +551,66 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
     const double sec_per_beat = 60.0 / bpm;
     const double samples_per_beat = fs * sec_per_beat;
 
-    /* Pulse duration: 200 ms calibrated window, capped at 60% of beat duration */
-    double pulse_dur = 0.200;
-    if (pulse_dur > 0.60 * sec_per_beat)
-        pulse_dur = 0.60 * sec_per_beat;
+    /* Base duration, adjusted by tone if noise mode */
+    double base_dur = (gen->pulse_dur_s > 0.0) ? gen->pulse_dur_s : 0.200;
+    double pulse_dur = base_dur;
+    double t_att = 0.005; /* default 5 ms attack */
+    double t_rel = 0.005; /* default 5 ms release */
 
-    const double t_att = 0.005; /* 5 ms attack */
-    const double t_rel = 0.005; /* 5 ms release */
+    const double tone = clampd(gen->tone, 0.0, 1.0);
+    const int mode = gen->mode;
+
+    if (mode == HRTF_TEST_MODE_NOISE) {
+        if (tone < 0.5) {
+            /* Low rumble: longer duration, smoother attack */
+            const double r = tone * 2.0; /* 0.0 = full rumble, 1.0 = pink noise */
+            pulse_dur = base_dur * (1.25 - 0.25 * r);
+            t_att = 0.012 - 0.007 * r; /* 12 ms down to 5 ms */
+            t_rel = 0.015 - 0.010 * r; /* 15 ms down to 5 ms */
+        } else {
+            /* Crisp transient: shorter duration, snappy attack */
+            const double t = (tone - 0.5) * 2.0; /* 0.0 = pink noise, 1.0 = crisp click */
+            pulse_dur = base_dur * (1.0 - 0.65 * t); /* down to ~70 ms */
+            t_att = 0.005 - 0.004 * t; /* down to 1 ms */
+            t_rel = 0.005;
+        }
+    } else if (mode == HRTF_TEST_MODE_SINE) {
+        t_att = 0.005;
+        t_rel = 0.005;
+    }
+
+    if (pulse_dur > 0.75 * sec_per_beat)
+        pulse_dur = 0.75 * sec_per_beat;
+
     const double beats_per_sample = bpm / (60.0 * fs);
 
     for (size_t i = 0; i < n; ++i) {
         double t_in_beat = 0.0;
+        int is_beat_start_sample = 0;
 
         if (is_playing) {
             double current_beat = beat_pos + (double)i * beats_per_sample;
             double phase = current_beat - floor(current_beat);
             t_in_beat = phase * sec_per_beat;
+            double prev_counter = gen->free_sample_counter;
             gen->free_sample_counter = phase * samples_per_beat;
+            if (gen->free_sample_counter < prev_counter || (size_t)gen->free_sample_counter == 0) {
+                is_beat_start_sample = 1;
+            }
         } else {
             t_in_beat = gen->free_sample_counter / fs;
+            if ((size_t)gen->free_sample_counter == 0) {
+                is_beat_start_sample = 1;
+            }
             gen->free_sample_counter += 1.0;
             if (gen->free_sample_counter >= samples_per_beat)
                 gen->free_sample_counter -= samples_per_beat;
+        }
+
+        if (mode == HRTF_TEST_MODE_CLICK) {
+            /* Dirac click impulse at onset */
+            out_mono[i] = is_beat_start_sample ? 0.85f : 0.0f;
+            continue;
         }
 
         /* Calculate raised-cosine (Hann) envelope */
@@ -531,7 +625,17 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
             }
         }
 
-        /* 32-bit xorshift PRNG */
+        if (mode == HRTF_TEST_MODE_SINE) {
+            /* Sine burst at freq_hz */
+            double freq = gen->freq_hz > 20.0 ? gen->freq_hz : 1000.0;
+            float s = (float)sin(gen->sine_phase);
+            gen->sine_phase += 2.0 * HRTF_PI * freq / fs;
+            if (gen->sine_phase >= 2.0 * HRTF_PI) gen->sine_phase -= 2.0 * HRTF_PI;
+            out_mono[i] = s * 0.25f * envelope;
+            continue;
+        }
+
+        /* HRTF_TEST_MODE_NOISE: PRNG + Pink Filter + Tone Morphing */
         gen->prng_state ^= gen->prng_state << 13;
         gen->prng_state ^= gen->prng_state >> 17;
         gen->prng_state ^= gen->prng_state << 5;
@@ -547,8 +651,24 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
         float pink = gen->b0 + gen->b1 + gen->b2 + gen->b3 + gen->b4 + gen->b5 + gen->b6 + white * 0.5362f;
         gen->b6 = white * 0.115926f;
 
-        /* Calibrated output level (-14 dBFS nominal burst RMS) */
-        out_mono[i] = pink * 0.18f * envelope;
+        /* 1-pole low-pass rumble filter (~160 Hz cutoff) */
+        const float rumble_coeff = (float)(1.0 - exp(-2.0 * HRTF_PI * 160.0 / fs));
+        gen->rumble_lpf += rumble_coeff * (white - gen->rumble_lpf);
+
+        float sig = 0.0f;
+        if (tone <= 0.5) {
+            /* Blend rumble (tone=0.0) to pink noise (tone=0.5) */
+            float r = (float)(tone * 2.0);
+            float rumble = gen->rumble_lpf * 1.8f;
+            sig = (1.0f - r) * rumble + r * (pink * 0.18f);
+        } else {
+            /* Blend pink noise (tone=0.5) to crisp transient/snap (tone=1.0) */
+            float t = (float)((tone - 0.5) * 2.0);
+            float crisp = (white - gen->b3) * 0.30f;
+            sig = (1.0f - t) * (pink * 0.18f) + t * crisp;
+        }
+
+        out_mono[i] = sig * envelope;
     }
 }
 

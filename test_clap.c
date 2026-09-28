@@ -205,6 +205,13 @@ int main(void) {
     const clap_plugin_params_t *params =
         (const clap_plugin_params_t *)plugin->get_extension(plugin, CLAP_EXT_PARAMS);
     if (params && params->flush && params->get_value) {
+        if (params->count(plugin) != 7u) {
+            printf("ERROR: params count is %u, expected 7\n", params->count(plugin));
+            ++failures;
+        } else {
+            printf("SUCCESS: params count is 7 as expected.\n");
+        }
+
         clap_event_param_value_t nan_event;
         memset(&nan_event, 0, sizeof(nan_event));
         nan_event.header.size = sizeof(nan_event);
@@ -302,6 +309,8 @@ int main(void) {
             flush_param(plugin, params, 3, 30.0);   /* elevation, degrees */
             flush_param(plugin, params, 4, 0.40);   /* space, 0..1 */
             flush_param(plugin, params, 5, 1.0);    /* test pulse, on */
+            flush_param(plugin, params, 6, 0.85);   /* test tone, 0..1 */
+            flush_param(plugin, params, 7, 1.15);   /* ear scale, 0.70..1.30 */
 
             if (!state->save(plugin, &os)) {
                 printf("ERROR: state save failed\n");
@@ -313,6 +322,8 @@ int main(void) {
             flush_param(plugin, params, 3, 0.0);
             flush_param(plugin, params, 4, 0.0);
             flush_param(plugin, params, 5, 0.0);
+            flush_param(plugin, params, 6, 0.5);
+            flush_param(plugin, params, 7, 1.0);
 
             mem.pos = 0;
             if (!state->load(plugin, &is)) {
@@ -320,12 +331,14 @@ int main(void) {
                 ++failures;
             }
 
-            double d = 0.0, r = 0.0, e = 0.0, s = 0.0, p_val = 0.0;
+            double d = 0.0, r = 0.0, e = 0.0, s = 0.0, p_val = 0.0, t_val = 0.0, es_val = 0.0;
             params->get_value(plugin, 1, &d);
             params->get_value(plugin, 2, &r);
             params->get_value(plugin, 3, &e);
             params->get_value(plugin, 4, &s);
             params->get_value(plugin, 5, &p_val);
+            params->get_value(plugin, 6, &t_val);
+            params->get_value(plugin, 7, &es_val);
             if (fabs(d - 8.0) > 1e-9) {
                 printf("ERROR: distance was not restored (got %f)\n", d);
                 ++failures;
@@ -345,8 +358,16 @@ int main(void) {
             if (fabs(p_val - 1.0) > 1e-9) {
                 printf("ERROR: test pulse was not restored (got %f)\n", p_val);
                 ++failures;
+            }
+            if (fabs(t_val - 0.85) > 1e-9) {
+                printf("ERROR: test tone was not restored (got %f)\n", t_val);
+                ++failures;
+            }
+            if (fabs(es_val - 1.15) > 1e-9) {
+                printf("ERROR: ear scale was not restored (got %f)\n", es_val);
+                ++failures;
             } else {
-                printf("SUCCESS: state round-trip preserved all 5 parameters.\n");
+                printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
 
             /* Test internal pulse generation with silent input */

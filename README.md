@@ -51,7 +51,9 @@ copy RotatingHRTF_v2.vst3 "C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vs
 | **Rotation** | 0.0 – 360.0 | 0.0 | degrees (`deg`) | Horizontal azimuth angle. `0°` = Front, `90°` = Right ear, `180°` = Rear, `270°` = Left ear. |
 | **Elevation** | -90.0 – +90.0 | 0.0 | degrees (`deg`) | Vertical angle. `-90°` = Below, `0°` = Horizontal plane, `+90°` = Directly overhead. Dynamically modulates pinna concha notches. |
 | **Space** | 0.0 – 100.0 | 15.0 | percent (`%`) | Room boundary early reflection externalisation engine. Pulls audio outside the skull into a natural acoustic room. |
-| **Test Pulse** | Off / On (0 / 1) | Off | toggle | Built-in test pulse generator. Synthesises psychoacoustically calibrated 200 ms pink noise bursts on each beat (tempo-synchronised to the host). |
+| **Test Pulse** | Off / On (0 / 1) | Off | toggle | Built-in test pulse generator. Synthesises psychoacoustically calibrated pulses on each beat (tempo-synchronised to the host). |
+| **Test Tone** | 0.0 – 100.0 | 50.0 | percent (`%`) | Test pulse timbre morphing: `0%` = sub-rumble low-pass thud, `50%` = reference $1/f$ pink noise, `100%` = snappy crisp transient. |
+| **Ear Scale** | 70.0 – 130.0 | 100.0 | percent (`%`) | Anthropometric head and pinna scaling. Scales interaural time delay (ITD) and shifts pinna resonance and concha notch frequencies ($f' = f / \alpha$). |
 
 All parameters feature smooth exponential slewing (20–50 ms) inside [hrtf_core.c](file:///g:/dev/hrtf/hrtf_core.c) to prevent clicking or zipper noise during automation.
 
@@ -59,12 +61,22 @@ All parameters feature smooth exponential slewing (20–50 ms) inside [hrtf_core
 
 ## Calibration & Test Signals
 
-For critical acoustic verification, the repository includes psychoacoustically calibrated test signals:
+For critical acoustic verification, the repository includes psychoacoustically calibrated test signals and tools:
 - `pulsed_pink_noise_48k.wav`: 48 kHz, 24-bit PCM mono loopable WAV (8 beats at 120 BPM). Each beat fires a 200 ms burst of $1/f$ pink noise with 5 ms Hann onsets and decays.
-- `tools/generate_test_pulse.c`: Standalone pure C command-line tool (built and executed automatically by `build_all.bat`) linking against `hrtf_core.c` to synthesise test WAV signals with acoustic parity.
-- **Built-in Test Pulse Tick Box**: Available directly inside the VST3 and CLAP plugin as a dedicated toggle parameter. When enabled, it replaces the track input with the beat-synchronised pink noise pulse, allowing direct 3D positioning adjustments in Ableton Live without requiring external audio tracks.
-
----
+- `tools/generate_test_pulse.c`: Standalone pure C command-line tool (built and executed automatically by `build_all.bat`) linking against `hrtf_core.c` to synthesise test WAV signals with exact acoustic parity.
+  - **CLI Options**:
+    ```
+    -o, --output <path>       Output WAV file path
+    -t, --tone <0.0..1.0>     Tone morphing (0.0=rumble, 0.5=pink, 1.0=crisp)
+    -m, --mode <mode>         Signal mode: noise, sine, click
+    -f, --freq <Hz>           Sine test frequency in Hz (default: 1000.0)
+    -b, --bpm <BPM>           Tempo in beats per minute (default: 120.0)
+    -n, --beats <count>       Total beats to synthesise (default: 8)
+    -d, --dur <ms>            Pulse duration in milliseconds (default: 200.0)
+    -s, --samplerate <Hz>     Audio sample rate in Hz (default: 48000)
+    -h, --help                Display help message
+    ```
+- **Built-in Test Pulse & Tone Controls**: Available directly inside the VST3 and CLAP plugins. When enabled, the pulse generator replaces track audio with beat-aligned test pulses, allowing direct 3D positioning adjustments in Ableton Live without requiring external audio tracks.
 
 ## Building from Source
 

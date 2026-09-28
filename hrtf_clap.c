@@ -24,7 +24,9 @@ enum {
     PARAM_ROTATION = 2,
     PARAM_ELEVATION = 3,
     PARAM_SPACE = 4,
-    PARAM_TEST_PULSE = 5
+    PARAM_TEST_PULSE = 5,
+    PARAM_TEST_TONE = 6,
+    PARAM_EAR_SCALE = 7
 };
 
 typedef struct {
@@ -37,6 +39,8 @@ typedef struct {
     double elevation_deg;
     double space;
     double test_pulse;
+    double test_tone;
+    double ear_scale;
     HrtfTestGen test_gen;
     bool active;
     float *silence;            /* zeros, used when the input port is inactive */
@@ -86,7 +90,10 @@ static bool plugin_init(const clap_plugin_t *plugin)
     p->elevation_deg = 0.0;
     p->space = 0.15;
     p->test_pulse = 0.0;
+    p->test_tone = 0.5;
+    p->ear_scale = 1.0;
     hrtf_test_gen_init(&p->test_gen, p->sample_rate);
+    hrtf_test_gen_set_tone(&p->test_gen, p->test_tone);
     p->active = false;
     return true;
 }
@@ -140,7 +147,9 @@ static bool plugin_activate(const clap_plugin_t *plugin,
     hrtf_set_rotation_phase(p->core, p->rotation_phase);
     hrtf_set_elevation_deg(p->core, p->elevation_deg);
     hrtf_set_space(p->core, p->space);
+    hrtf_set_ear_scale(p->core, p->ear_scale);
     hrtf_test_gen_init(&p->test_gen, sample_rate);
+    hrtf_test_gen_set_tone(&p->test_gen, p->test_tone);
     hrtf_reset(p->core);
     p->active = true;
     return true;
@@ -224,7 +233,7 @@ static const clap_plugin_audio_ports_t audio_ports_ext = {
 static uint32_t params_count(const clap_plugin_t *plugin)
 {
     (void)plugin;
-    return 5u;
+    return 7u;
 }
 
 static bool params_get_info(const clap_plugin_t *plugin,
@@ -232,7 +241,7 @@ static bool params_get_info(const clap_plugin_t *plugin,
                             clap_param_info_t *info)
 {
     (void)plugin;
-    if (!info || index >= 5u) return false;
+    if (!info || index >= 7u) return false;
 
     memset(info, 0, sizeof(*info));
 
@@ -280,6 +289,22 @@ static bool params_get_info(const clap_plugin_t *plugin,
         info->min_value = 0.0;
         info->max_value = 1.0;
         info->default_value = 0.0;
+    } else if (index == 5u) {
+        info->id = PARAM_TEST_TONE;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Test Tone");
+        snprintf(info->module, sizeof(info->module), "Generator");
+        info->min_value = 0.0;
+        info->max_value = 1.0;
+        info->default_value = 0.5;
+    } else if (index == 6u) {
+        info->id = PARAM_EAR_SCALE;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Ear Scale");
+        snprintf(info->module, sizeof(info->module), "Morphology");
+        info->min_value = 0.70;
+        info->max_value = 1.30;
+        info->default_value = 1.00;
     }
     return true;
 }
@@ -309,6 +334,14 @@ static bool params_get_value(const clap_plugin_t *plugin,
     }
     if (param_id == PARAM_TEST_PULSE) {
         *out_value = p->test_pulse;
+        return true;
+    }
+    if (param_id == PARAM_TEST_TONE) {
+        *out_value = p->test_tone;
+        return true;
+    }
+    if (param_id == PARAM_EAR_SCALE) {
+        *out_value = p->ear_scale;
         return true;
     }
     return false;
@@ -343,6 +376,14 @@ static bool params_value_to_text(const clap_plugin_t *plugin,
     }
     if (param_id == PARAM_TEST_PULSE) {
         snprintf(out_buffer, out_buffer_capacity, "%s", value >= 0.5 ? "On" : "Off");
+        return true;
+    }
+    if (param_id == PARAM_TEST_TONE) {
+        snprintf(out_buffer, out_buffer_capacity, "%.0f %%", value * 100.0);
+        return true;
+    }
+    if (param_id == PARAM_EAR_SCALE) {
+        snprintf(out_buffer, out_buffer_capacity, "%.0f %%", value * 100.0);
         return true;
     }
     return false;
@@ -425,6 +466,24 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
         return true;
     }
 
+    if (param_id == PARAM_TEST_TONE) {
+        if (*end == '%') ++end;
+        if (*end != '\0') return false;
+        if (v > 1.0) v /= 100.0;
+        if (v < 0.0 || v > 1.0) return false;
+        *out_value = v;
+        return true;
+    }
+
+    if (param_id == PARAM_EAR_SCALE) {
+        if (*end == '%') ++end;
+        if (*end != '\0') return false;
+        if (v > 10.0) v /= 100.0;
+        if (v < 0.70 || v > 1.30) return false;
+        *out_value = v;
+        return true;
+    }
+
     return false;
 }
 
@@ -456,6 +515,16 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
         if (p->core) hrtf_set_space(p->core, value);
     } else if (id == PARAM_TEST_PULSE) {
         p->test_pulse = (value >= 0.5) ? 1.0 : 0.0;
+    } else if (id == PARAM_TEST_TONE) {
+        if (value < 0.0) value = 0.0;
+        if (value > 1.0) value = 1.0;
+        p->test_tone = value;
+        hrtf_test_gen_set_tone(&p->test_gen, value);
+    } else if (id == PARAM_EAR_SCALE) {
+        if (value < 0.70) value = 0.70;
+        if (value > 1.30) value = 1.30;
+        p->ear_scale = value;
+        if (p->core) hrtf_set_ear_scale(p->core, value);
     }
 }
 
@@ -492,19 +561,21 @@ static const clap_plugin_params_t params_ext = {
 /* ------------------------------ state ------------------------------ */
 
 static const char kStateMagic[4] = { 'H', 'R', 'T', 'F' };
-static const uint32_t kStateVersion = 3;
+static const uint32_t kStateVersion = 4;
 
 static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!stream || !stream->write) return false;
 
-    double values[5];
+    double values[7];
     values[0] = p->distance_m;
     values[1] = p->rotation_phase;
     values[2] = p->elevation_deg;
     values[3] = p->space;
     values[4] = p->test_pulse;
+    values[5] = p->test_tone;
+    values[6] = p->ear_scale;
 
     if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
         return false;
@@ -527,7 +598,7 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, magic, sizeof(magic)) != (int64_t)sizeof(magic)) return false;
     if (memcmp(magic, kStateMagic, sizeof(magic)) != 0) return false;
     if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
-    if (version != 1 && version != 2 && version != kStateVersion) return false;
+    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return false;
 
     if (version == 1) {
         double values[2] = { 0.0, 0.0 };
@@ -544,10 +615,14 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         p->elevation_deg = 0.0;
         p->space = 0.15;
         p->test_pulse = 0.0;
+        p->test_tone = 0.5;
+        p->ear_scale = 1.0;
         if (p->core) {
             hrtf_set_elevation_deg(p->core, 0.0);
             hrtf_set_space(p->core, 0.15);
+            hrtf_set_ear_scale(p->core, 1.0);
         }
+        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
     } else if (version == 2) {
         double values[4] = { 0.0, 0.0, 0.0, 0.0 };
         if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
@@ -569,6 +644,12 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
             if (p->core) hrtf_set_space(p->core, values[3]);
         }
         p->test_pulse = 0.0;
+        p->test_tone = 0.5;
+        p->ear_scale = 1.0;
+        if (p->core) {
+            hrtf_set_ear_scale(p->core, 1.0);
+        }
+        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
     } else if (version == 3) {
         double values[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
         if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
@@ -591,6 +672,43 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
         }
         if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
             p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
+        }
+        p->test_tone = 0.5;
+        p->ear_scale = 1.0;
+        if (p->core) {
+            hrtf_set_ear_scale(p->core, 1.0);
+        }
+        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
+    } else if (version == 4) {
+        double values[7] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0 };
+        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+            p->distance_m = values[0];
+            if (p->core) hrtf_set_distance(p->core, values[0]);
+        }
+        if (isfinite(values[1])) {
+            double phase = wrap_unit(values[1]);
+            p->rotation_phase = phase;
+            if (p->core) hrtf_set_rotation_phase(p->core, phase);
+        }
+        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
+            p->elevation_deg = values[2];
+            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
+        }
+        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
+            p->space = values[3];
+            if (p->core) hrtf_set_space(p->core, values[3]);
+        }
+        if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
+            p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
+        }
+        if (isfinite(values[5]) && values[5] >= 0.0 && values[5] <= 1.0) {
+            p->test_tone = values[5];
+            hrtf_test_gen_set_tone(&p->test_gen, values[5]);
+        }
+        if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
+            p->ear_scale = values[6];
+            if (p->core) hrtf_set_ear_scale(p->core, values[6]);
         }
     }
 

@@ -197,6 +197,11 @@ int main()
     {
         controller->initialize(nullptr);
         std::cout << "Controller parameter count: " << controller->getParameterCount() << "\n";
+        if (controller->getParameterCount() != 7)
+        {
+            std::cerr << "ERROR: expected 7 parameters in controller, got " << controller->getParameterCount() << "\n";
+            ++failures;
+        }
         for (Steinberg::int32 p = 0; p < controller->getParameterCount(); ++p)
         {
             Steinberg::Vst::ParameterInfo pInfo = {};
@@ -541,6 +546,127 @@ int main()
             }
         }
         releaseProcessor (p);
+    }
+
+    // Test Tone Parameter: 0.0 (rumble) vs 1.0 (crisp transient) alters the generated pulse spectrum
+    {
+        Proc p1 = makeProcessor (factory);
+        Proc p2 = makeProcessor (factory);
+        if (p1.processor && p2.processor)
+        {
+            const int NT = 256;
+            float zero_in[NT] = {0};
+            float out1_l[NT] = {0}, out1_r[NT] = {0};
+            float out2_l[NT] = {0}, out2_r[NT] = {0};
+
+            float* inPtrs1[2] = { zero_in, zero_in };
+            float* outPtrs1[2] = { out1_l, out1_r };
+            Steinberg::Vst::AudioBusBuffers inBus1 = {}; inBus1.numChannels = 2; inBus1.channelBuffers32 = inPtrs1;
+            Steinberg::Vst::AudioBusBuffers outBus1 = {}; outBus1.numChannels = 2; outBus1.channelBuffers32 = outPtrs1;
+            Steinberg::Vst::ProcessData data1 = {};
+            data1.processMode = Steinberg::Vst::kRealtime;
+            data1.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data1.numSamples = NT; data1.numInputs = 1; data1.inputs = &inBus1; data1.numOutputs = 1; data1.outputs = &outBus1;
+
+            float* inPtrs2[2] = { zero_in, zero_in };
+            float* outPtrs2[2] = { out2_l, out2_r };
+            Steinberg::Vst::AudioBusBuffers inBus2 = {}; inBus2.numChannels = 2; inBus2.channelBuffers32 = inPtrs2;
+            Steinberg::Vst::AudioBusBuffers outBus2 = {}; outBus2.numChannels = 2; outBus2.channelBuffers32 = outPtrs2;
+            Steinberg::Vst::ProcessData data2 = {};
+            data2.processMode = Steinberg::Vst::kRealtime;
+            data2.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data2.numSamples = NT; data2.numInputs = 1; data2.inputs = &inBus2; data2.numOutputs = 1; data2.outputs = &outBus2;
+
+            DummyChanges changes1;
+            changes1.q.id = RotatingHrtf::kParamTestPulse; changes1.q.val = 1.0;
+            data1.inputParameterChanges = &changes1;
+            p1.processor->process (data1); // enable pulse
+
+            changes1.q.id = RotatingHrtf::kParamTestTone; changes1.q.val = 0.0; // low rumble
+            data1.inputParameterChanges = &changes1;
+            p1.processor->process (data1);
+
+            DummyChanges changes2;
+            changes2.q.id = RotatingHrtf::kParamTestPulse; changes2.q.val = 1.0;
+            data2.inputParameterChanges = &changes2;
+            p2.processor->process (data2); // enable pulse
+
+            changes2.q.id = RotatingHrtf::kParamTestTone; changes2.q.val = 1.0; // crisp transient
+            data2.inputParameterChanges = &changes2;
+            p2.processor->process (data2);
+
+            double diff = 0.0;
+            for (int i = 0; i < NT; ++i) {
+                diff += std::abs (out1_l[i] - out2_l[i]) + std::abs (out1_r[i] - out2_r[i]);
+            }
+
+            if (diff > 0.01) {
+                std::cout << "SUCCESS: Test Tone parameter significantly alters synthesised pulse spectrum (diff=" << diff << ").\n";
+            } else {
+                std::cerr << "ERROR: Test Tone parameter produced negligible difference (diff=" << diff << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p1);
+        releaseProcessor (p2);
+    }
+
+    // Ear Scale Parameter: 70% vs 130% scale modifies pinna notches and ITD
+    {
+        Proc p1 = makeProcessor (factory);
+        Proc p2 = makeProcessor (factory);
+        if (p1.processor && p2.processor)
+        {
+            const int NS = 256;
+            float in_sig[NS];
+            for (int i = 0; i < NS; ++i) in_sig[i] = sinf (2.0f * 3.14159265f * 2000.0f * (float)i / 48000.0f);
+            float out1_l[NS] = {0}, out1_r[NS] = {0};
+            float out2_l[NS] = {0}, out2_r[NS] = {0};
+
+            float* inPtrs1[2] = { in_sig, in_sig }; float* outPtrs1[2] = { out1_l, out1_r };
+            Steinberg::Vst::AudioBusBuffers inBus1 = {}; inBus1.numChannels = 2; inBus1.channelBuffers32 = inPtrs1;
+            Steinberg::Vst::AudioBusBuffers outBus1 = {}; outBus1.numChannels = 2; outBus1.channelBuffers32 = outPtrs1;
+            Steinberg::Vst::ProcessData data1 = {};
+            data1.processMode = Steinberg::Vst::kRealtime; data1.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data1.numSamples = NS; data1.numInputs = 1; data1.inputs = &inBus1; data1.numOutputs = 1; data1.outputs = &outBus1;
+
+            float* inPtrs2[2] = { in_sig, in_sig }; float* outPtrs2[2] = { out2_l, out2_r };
+            Steinberg::Vst::AudioBusBuffers inBus2 = {}; inBus2.numChannels = 2; inBus2.channelBuffers32 = inPtrs2;
+            Steinberg::Vst::AudioBusBuffers outBus2 = {}; outBus2.numChannels = 2; outBus2.channelBuffers32 = outPtrs2;
+            Steinberg::Vst::ProcessData data2 = {};
+            data2.processMode = Steinberg::Vst::kRealtime; data2.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data2.numSamples = NS; data2.numInputs = 1; data2.inputs = &inBus2; data2.numOutputs = 1; data2.outputs = &outBus2;
+
+            DummyChanges changes1;
+            changes1.q.id = RotatingHrtf::kParamRotation; changes1.q.val = 0.25; // 90 deg lateral
+            data1.inputParameterChanges = &changes1;
+            p1.processor->process (data1);
+            changes1.q.id = RotatingHrtf::kParamEarScale; changes1.q.val = 0.0; // 70% scale
+            data1.inputParameterChanges = &changes1;
+            for (int b = 0; b < 6; ++b) { p1.processor->process (data1); data1.inputParameterChanges = nullptr; }
+
+            DummyChanges changes2;
+            changes2.q.id = RotatingHrtf::kParamRotation; changes2.q.val = 0.25; // 90 deg lateral
+            data2.inputParameterChanges = &changes2;
+            p2.processor->process (data2);
+            changes2.q.id = RotatingHrtf::kParamEarScale; changes2.q.val = 1.0; // 130% scale
+            data2.inputParameterChanges = &changes2;
+            for (int b = 0; b < 6; ++b) { p2.processor->process (data2); data2.inputParameterChanges = nullptr; }
+
+            double diff = 0.0;
+            for (int i = 0; i < NS; ++i) {
+                diff += std::abs (out1_l[i] - out2_l[i]) + std::abs (out1_r[i] - out2_r[i]);
+            }
+
+            if (diff > 0.01) {
+                std::cout << "SUCCESS: Anthropometric Ear Scale parameter shifts ITD delay and spectral pinna filtering (diff=" << diff << ").\n";
+            } else {
+                std::cerr << "ERROR: Ear Scale parameter produced negligible difference (diff=" << diff << ")\n";
+                ++failures;
+            }
+        }
+        releaseProcessor (p1);
+        releaseProcessor (p2);
     }
 
     // Regression: the VST3 spec allows null sample buffers when a bus is

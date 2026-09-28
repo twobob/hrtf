@@ -41,6 +41,8 @@ private:
     Steinberg::Vst::ParamValue mElevationNorm = 0.5; // (0.0 - (-90.0)) / 180.0 = 0.5 (0 deg)
     Steinberg::Vst::ParamValue mSpaceNorm = 0.15;     // 15% room externalisation
     Steinberg::Vst::ParamValue mTestPulseNorm = 0.0; // 0 = off, 1 = on
+    Steinberg::Vst::ParamValue mTestToneNorm = 0.5;  // 0 = low rumble, 0.5 = pink noise, 1.0 = crisp transient
+    Steinberg::Vst::ParamValue mEarScaleNorm = 0.5;  // (1.00 - 0.70) / 0.60 = 0.5 (100% scale)
     HrtfTestGen mTestGen = {};
     std::vector<float> mMonoBuffer;
 };
