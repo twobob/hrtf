@@ -25,6 +25,11 @@ set "BUNDLE=%VST3_ROOT%\RotatingHRTF_v2.vst3"
 set "TARGET_DIR=%BUNDLE%\Contents\x86_64-win"
 set "TARGET=%TARGET_DIR%\RotatingHRTF_v2.vst3"
 set "SOURCE=%~dp0RotatingHRTF_v2.vst3"
+if exist "%~dp0RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3" (
+    set "SOURCE=%~dp0RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3"
+) else if exist "%~dp0bundle\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3" (
+    set "SOURCE=%~dp0bundle\RotatingHRTF_v2.vst3\Contents\x86_64-win\RotatingHRTF_v2.vst3"
+)
 
 echo ==========================================================
 echo Installing Rotating HRTF v2 VST3
