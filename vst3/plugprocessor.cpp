@@ -251,6 +251,18 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
 
     float* mono = mMonoBuffer.data ();
 
+    if (mCore)
+    {
+        double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
+        double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
+        hrtf_set_distance (mCore, dist_m);
+        hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
+        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
+        hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
+        hrtf_set_ear_scale (mCore, ear_scale);
+        hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm.load (std::memory_order_relaxed));
+    }
+
     Steinberg::int32 cursor = 0;
     while (cursor < (Steinberg::int32)numSamples)
     {
@@ -379,23 +391,9 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
     if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
         mTestPulseNorm.store (pNorm, std::memory_order_relaxed);
     if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
-    {
         mTestToneNorm.store (tNorm, std::memory_order_relaxed);
-        hrtf_test_gen_set_tone (&mTestGen, tNorm);
-    }
     if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
         mEarScaleNorm.store (esNorm, std::memory_order_relaxed);
-
-    if (mCore)
-    {
-        double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
-        double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
-        hrtf_set_distance (mCore, dist_m);
-        hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
-        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
-        hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
-        hrtf_set_ear_scale (mCore, ear_scale);
-    }
 
     return Steinberg::kResultOk;
 }

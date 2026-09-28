@@ -60,6 +60,7 @@ enum {
 
 typedef struct {
     clap_plugin_t plugin;
+    const clap_host_t *host;
     HrtfCore *core;
     double sample_rate;
     volatile double distance_m;
@@ -536,34 +537,28 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
         if (value < 0.05) value = 0.05;
         if (value > 20.0) value = 20.0;
         set_atomic_double(&p->distance_m, value);
-        if (p->core) hrtf_set_distance(p->core, value);
     } else if (id == PARAM_ROTATION) {
         value -= floor(value);
         if (value < 0.0) value += 1.0;
         set_atomic_double(&p->rotation_phase, value);
-        if (p->core) hrtf_set_rotation_phase(p->core, value);
     } else if (id == PARAM_ELEVATION) {
         if (value < -90.0) value = -90.0;
         if (value > 90.0) value = 90.0;
         set_atomic_double(&p->elevation_deg, value);
-        if (p->core) hrtf_set_elevation_deg(p->core, value);
     } else if (id == PARAM_SPACE) {
         if (value < 0.0) value = 0.0;
         if (value > 1.0) value = 1.0;
         set_atomic_double(&p->space, value);
-        if (p->core) hrtf_set_space(p->core, value);
     } else if (id == PARAM_TEST_PULSE) {
         set_atomic_double(&p->test_pulse, (value >= 0.5) ? 1.0 : 0.0);
     } else if (id == PARAM_TEST_TONE) {
         if (value < 0.0) value = 0.0;
         if (value > 1.0) value = 1.0;
         set_atomic_double(&p->test_tone, value);
-        hrtf_test_gen_set_tone(&p->test_gen, value);
     } else if (id == PARAM_EAR_SCALE) {
         if (value < 0.70) value = 0.70;
         if (value > 1.30) value = 1.30;
         set_atomic_double(&p->ear_scale, value);
-        if (p->core) hrtf_set_ear_scale(p->core, value);
     }
 }
 
@@ -600,7 +595,7 @@ static const clap_plugin_params_t params_ext = {
 /* ------------------------------ state ------------------------------ */
 
 static const char kStateMagic[4] = { 'H', 'R', 'T', 'F' };
-static const uint32_t kStateVersion = 4;
+static const uint32_t kStateVersion = HRTF_STATE_VERSION;
 
 static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream)
 {
@@ -643,31 +638,33 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
     if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
         set_atomic_double(&p->distance_m, values[0]);
-        if (p->core) hrtf_set_distance(p->core, values[0]);
     }
     if (isfinite(values[1])) {
         double phase = wrap_unit(values[1]);
         set_atomic_double(&p->rotation_phase, phase);
-        if (p->core) hrtf_set_rotation_phase(p->core, phase);
     }
     if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
         set_atomic_double(&p->elevation_deg, values[2]);
-        if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
     }
     if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
         set_atomic_double(&p->space, values[3]);
-        if (p->core) hrtf_set_space(p->core, values[3]);
     }
     if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
         set_atomic_double(&p->test_pulse, (values[4] >= 0.5) ? 1.0 : 0.0);
     }
     if (isfinite(values[5]) && values[5] >= 0.0 && values[5] <= 1.0) {
         set_atomic_double(&p->test_tone, values[5]);
-        hrtf_test_gen_set_tone(&p->test_gen, values[5]);
     }
     if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
         set_atomic_double(&p->ear_scale, values[6]);
-        if (p->core) hrtf_set_ear_scale(p->core, values[6]);
+    }
+
+    if (p->host) {
+        const clap_host_params_t *host_params =
+            (const clap_host_params_t *)p->host->get_extension(p->host, CLAP_EXT_PARAMS);
+        if (host_params && host_params->rescan) {
+            host_params->rescan(p->host, CLAP_PARAM_RESCAN_VALUES);
+        }
     }
 
     return true;
@@ -689,6 +686,23 @@ static void apply_event(RotatingHrtf *p, const clap_event_header_t *h)
     const clap_event_param_value_t *e =
         (const clap_event_param_value_t *)h;
     params_apply_value(p, e->param_id, e->value);
+
+    /* Audio thread: sample-accurate parameter updates at current offset */
+    if (p->core) {
+        if (e->param_id == PARAM_DISTANCE)
+            hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
+        else if (e->param_id == PARAM_ROTATION)
+            hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
+        else if (e->param_id == PARAM_ELEVATION)
+            hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
+        else if (e->param_id == PARAM_SPACE)
+            hrtf_set_space(p->core, get_atomic_double(&p->space));
+        else if (e->param_id == PARAM_EAR_SCALE)
+            hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
+    }
+    if (e->param_id == PARAM_TEST_TONE) {
+        hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
+    }
 }
 
 static clap_process_status plugin_process(const clap_plugin_t *plugin,
@@ -720,6 +734,15 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     const unsigned int old_mxcsr = _mm_getcsr();
     _mm_setcsr(old_mxcsr | 0x8040); /* Enable FTZ (bit 15) and DAZ (bit 6) */
 #endif
+
+    if (p->core) {
+        hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
+        hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
+        hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
+        hrtf_set_space(p->core, get_atomic_double(&p->space));
+        hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
+    }
+    hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
 
     const float *src = input_active ? in->data32[0] : p->silence;
     float *dst_l = out->data32[0];
@@ -858,7 +881,7 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *factory,
     RotatingHrtf *p = (RotatingHrtf *)calloc(1, sizeof(*p));
     if (!p) return NULL;
 
-    (void)host;
+    p->host = host;
     p->distance_m = 2.0;
     p->rotation_phase = 0.0;
     p->elevation_deg = 0.0;
