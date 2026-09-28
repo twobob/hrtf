@@ -98,6 +98,31 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
     return AudioEffect::setActive (state);
 }
 
+/* Downmix the input bus into the scratch buffer for [start, start+count).
+   Touches only preallocated memory, so it is safe on the audio thread. */
+static void copyMono (const Steinberg::Vst::AudioBusBuffers& inBus, float* mono,
+                      Steinberg::int32 start, Steinberg::int32 count)
+{
+    if (inBus.channelBuffers32 && inBus.numChannels >= 2 &&
+        inBus.channelBuffers32[0] && inBus.channelBuffers32[1])
+    {
+        const float* inL = inBus.channelBuffers32[0] + start;
+        const float* inR = inBus.channelBuffers32[1] + start;
+        for (Steinberg::int32 i = 0; i < count; ++i)
+            mono[i] = 0.5f * (inL[i] + inR[i]);
+    }
+    else if (inBus.channelBuffers32 && inBus.numChannels >= 1 &&
+             inBus.channelBuffers32[0])
+    {
+        const float* inL = inBus.channelBuffers32[0] + start;
+        std::copy (inL, inL + count, mono);
+    }
+    else
+    {
+        std::fill (mono, mono + count, 0.0f);
+    }
+}
+
 void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value)
 {
     /* A non-finite or out-of-range value must never be cached or saved. */
@@ -166,68 +191,66 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
         return Steinberg::kResultOk;
 
     const Steinberg::uint32 numSamples = (Steinberg::uint32)data.numSamples;
-    if (mMonoBuffer.size () < numSamples)
-        mMonoBuffer.resize (numSamples);
+    const size_t capacity = mMonoBuffer.size ();
+    if (capacity == 0)
+        return Steinberg::kResultOk; /* setupProcessing was never called */
 
     float* mono = mMonoBuffer.data ();
-
-    if (inBus.channelBuffers32 && inBus.numChannels >= 2 &&
-        inBus.channelBuffers32[0] && inBus.channelBuffers32[1])
-    {
-        const float* inL = inBus.channelBuffers32[0];
-        const float* inR = inBus.channelBuffers32[1];
-        for (Steinberg::uint32 i = 0; i < numSamples; ++i)
-            mono[i] = 0.5f * (inL[i] + inR[i]);
-    }
-    else if (inBus.channelBuffers32 && inBus.numChannels >= 1 &&
-             inBus.channelBuffers32[0])
-    {
-        const float* inL = inBus.channelBuffers32[0];
-        std::copy (inL, inL + numSamples, mono);
-    }
-    else
-    {
-        std::fill (mono, mono + numSamples, 0.0f);
-    }
 
     Steinberg::int32 cursor = 0;
     while (cursor < (Steinberg::int32)numSamples)
     {
-        Steinberg::int32 next = (Steinberg::int32)numSamples;
+        /* Never allocate on the audio thread. The block is filled and
+           rendered in windows no larger than the buffer that
+           setupProcessing sized, so a host that exceeds maxSamplesPerBlock
+           still gets correct audio instead of a reallocation in the
+           callback. */
+        const Steinberg::int32 remaining = (Steinberg::int32)numSamples - cursor;
+        const Steinberg::int32 windowFrames =
+            (Steinberg::int32)std::min<size_t> (capacity, (size_t)remaining);
+        const Steinberg::int32 windowStart = cursor;
+        const Steinberg::int32 windowEnd = windowStart + windowFrames;
 
-        for (Steinberg::int32 i = 0; i < numQueues; ++i)
+        copyMono (inBus, mono, windowStart, windowFrames);
+
+        while (cursor < windowEnd)
         {
-            if (!queues[i]) continue;
-            const Steinberg::int32 points = queues[i]->getPointCount ();
+            Steinberg::int32 next = windowEnd;
 
-            for (;;)
+            for (Steinberg::int32 i = 0; i < numQueues; ++i)
             {
-                if (consumed[i] >= points) break;
+                if (!queues[i]) continue;
+                const Steinberg::int32 points = queues[i]->getPointCount ();
 
-                Steinberg::int32 offset = 0;
-                Steinberg::Vst::ParamValue value = 0.0;
-                if (queues[i]->getPoint (consumed[i], offset, value) != Steinberg::kResultTrue)
+                for (;;)
                 {
-                    ++consumed[i];
-                    continue;
+                    if (consumed[i] >= points) break;
+
+                    Steinberg::int32 offset = 0;
+                    Steinberg::Vst::ParamValue value = 0.0;
+                    if (queues[i]->getPoint (consumed[i], offset, value) != Steinberg::kResultTrue)
+                    {
+                        ++consumed[i];
+                        continue;
+                    }
+                    if (offset <= cursor)
+                    {
+                        applyParameter (queues[i]->getParameterId (), value);
+                        ++consumed[i];
+                        continue;
+                    }
+                    if (offset < next) next = offset;
+                    break;
                 }
-                if (offset <= cursor)
-                {
-                    applyParameter (queues[i]->getParameterId (), value);
-                    ++consumed[i];
-                    continue;
-                }
-                if (offset < next) next = offset;
-                break;
             }
+
+            if (next <= cursor) break; /* no forward progress: stop rather than spin */
+
+            float* outSeg[2] = { outBus.channelBuffers32[0] + cursor,
+                                 outBus.channelBuffers32[1] + cursor };
+            hrtf_process (mCore, mono + (cursor - windowStart), outSeg, (size_t)(next - cursor));
+            cursor = next;
         }
-
-        if (next <= cursor) break; /* no forward progress: stop rather than spin */
-
-        float* outSeg[2] = { outBus.channelBuffers32[0] + cursor,
-                             outBus.channelBuffers32[1] + cursor };
-        hrtf_process (mCore, mono + cursor, outSeg, (size_t)(next - cursor));
-        cursor = next;
     }
 
     /* The whole block was written, so the output is not silent. A stale

@@ -394,6 +394,65 @@ int main()
         releaseProcessor (pb);
     }
 
+    // Oversized blocks: a host that exceeds maxSamplesPerBlock (256 here)
+    // must still get correct audio rather than a reallocation in the
+    // audio callback.
+    {
+        Proc p = makeProcessor (factory);
+        if (!p.processor)
+        {
+            std::cerr << "ERROR: could not create a processor for the oversized-block test\n";
+            ++failures;
+        }
+        else
+        {
+            const int NB = 1024;
+            float big_l[NB] = {0}, big_r[NB] = {0}, big_in[NB];
+            for (int i = 0; i < NB; ++i)
+                big_in[i] = sinf (2.0f * 3.14159265f * 440.0f * (float)i / 48000.0f);
+
+            float* inPtrs[2] = { big_in, big_in };
+            float* outPtrs[2] = { big_l, big_r };
+            Steinberg::Vst::AudioBusBuffers inBus = {};
+            inBus.numChannels = 2;
+            inBus.channelBuffers32 = inPtrs;
+            Steinberg::Vst::AudioBusBuffers outBus = {};
+            outBus.numChannels = 2;
+            outBus.channelBuffers32 = outPtrs;
+            Steinberg::Vst::ProcessData data = {};
+            data.processMode = Steinberg::Vst::kRealtime;
+            data.symbolicSampleSize = Steinberg::Vst::kSample32;
+            data.numSamples = NB;
+            data.numInputs = 1;
+            data.inputs = &inBus;
+            data.numOutputs = 1;
+            data.outputs = &outBus;
+
+            const Steinberg::tresult r = p.processor->process (data);
+
+            double energy = 0.0;
+            bool finite = true;
+            for (int i = 0; i < NB; ++i)
+            {
+                energy += std::fabs (big_l[i]) + std::fabs (big_r[i]);
+                if (!std::isfinite (big_l[i]) || !std::isfinite (big_r[i]))
+                    finite = false;
+            }
+
+            if (r != Steinberg::kResultOk || !finite || energy < 0.01)
+            {
+                std::cerr << "ERROR: a 1024-frame block was not rendered correctly (result="
+                          << r << ", energy=" << energy << ")\n";
+                ++failures;
+            }
+            else
+            {
+                std::cout << "SUCCESS: oversized blocks render correctly without reallocating.\n";
+            }
+        }
+        releaseProcessor (p);
+    }
+
     // Regression: the VST3 spec allows null sample buffers when a bus is
     // inactive. process() used to dereference them and take the host down.
     {
