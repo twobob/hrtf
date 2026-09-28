@@ -615,118 +615,37 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, magic, sizeof(magic)) != (int64_t)sizeof(magic)) return false;
     if (memcmp(magic, kStateMagic, sizeof(magic)) != 0) return false;
     if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
-    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return false;
+    if (version != kStateVersion) return false;
 
-    if (version == 1) {
-        double values[2] = { 0.0, 0.0 };
-        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
-        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-            p->distance_m = values[0];
-            if (p->core) hrtf_set_distance(p->core, values[0]);
-        }
-        if (isfinite(values[1])) {
-            double phase = wrap_unit(values[1]);
-            p->rotation_phase = phase;
-            if (p->core) hrtf_set_rotation_phase(p->core, phase);
-        }
-        p->elevation_deg = 0.0;
-        p->space = 0.15;
-        p->test_pulse = 0.0;
-        p->test_tone = 0.5;
-        p->ear_scale = 1.0;
-        if (p->core) {
-            hrtf_set_elevation_deg(p->core, 0.0);
-            hrtf_set_space(p->core, 0.15);
-            hrtf_set_ear_scale(p->core, 1.0);
-        }
-        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
-    } else if (version == 2) {
-        double values[4] = { 0.0, 0.0, 0.0, 0.0 };
-        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
-        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-            p->distance_m = values[0];
-            if (p->core) hrtf_set_distance(p->core, values[0]);
-        }
-        if (isfinite(values[1])) {
-            double phase = wrap_unit(values[1]);
-            p->rotation_phase = phase;
-            if (p->core) hrtf_set_rotation_phase(p->core, phase);
-        }
-        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
-            p->elevation_deg = values[2];
-            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
-        }
-        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
-            p->space = values[3];
-            if (p->core) hrtf_set_space(p->core, values[3]);
-        }
-        p->test_pulse = 0.0;
-        p->test_tone = 0.5;
-        p->ear_scale = 1.0;
-        if (p->core) {
-            hrtf_set_ear_scale(p->core, 1.0);
-        }
-        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
-    } else if (version == 3) {
-        double values[5] = { 0.0, 0.0, 0.0, 0.0, 0.0 };
-        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
-        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-            p->distance_m = values[0];
-            if (p->core) hrtf_set_distance(p->core, values[0]);
-        }
-        if (isfinite(values[1])) {
-            double phase = wrap_unit(values[1]);
-            p->rotation_phase = phase;
-            if (p->core) hrtf_set_rotation_phase(p->core, phase);
-        }
-        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
-            p->elevation_deg = values[2];
-            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
-        }
-        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
-            p->space = values[3];
-            if (p->core) hrtf_set_space(p->core, values[3]);
-        }
-        if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
-            p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
-        }
-        p->test_tone = 0.5;
-        p->ear_scale = 1.0;
-        if (p->core) {
-            hrtf_set_ear_scale(p->core, 1.0);
-        }
-        hrtf_test_gen_set_tone(&p->test_gen, 0.5);
-    } else if (version == 4) {
-        double values[7] = { 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 1.0 };
-        if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
-        if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-            p->distance_m = values[0];
-            if (p->core) hrtf_set_distance(p->core, values[0]);
-        }
-        if (isfinite(values[1])) {
-            double phase = wrap_unit(values[1]);
-            p->rotation_phase = phase;
-            if (p->core) hrtf_set_rotation_phase(p->core, phase);
-        }
-        if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
-            p->elevation_deg = values[2];
-            if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
-        }
-        if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
-            p->space = values[3];
-            if (p->core) hrtf_set_space(p->core, values[3]);
-        }
-        if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
-            p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
-        }
-        if (isfinite(values[5]) && values[5] >= 0.0 && values[5] <= 1.0) {
-            p->test_tone = values[5];
-            hrtf_test_gen_set_tone(&p->test_gen, values[5]);
-        }
-        if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
-            p->ear_scale = values[6];
-            if (p->core) hrtf_set_ear_scale(p->core, values[6]);
-        }
+    double values[7];
+    if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
+    if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
+        p->distance_m = values[0];
+        if (p->core) hrtf_set_distance(p->core, values[0]);
+    }
+    if (isfinite(values[1])) {
+        double phase = wrap_unit(values[1]);
+        p->rotation_phase = phase;
+        if (p->core) hrtf_set_rotation_phase(p->core, phase);
+    }
+    if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
+        p->elevation_deg = values[2];
+        if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
+    }
+    if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
+        p->space = values[3];
+        if (p->core) hrtf_set_space(p->core, values[3]);
+    }
+    if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
+        p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
+    }
+    if (isfinite(values[5]) && values[5] >= 0.0 && values[5] <= 1.0) {
+        p->test_tone = values[5];
+        hrtf_test_gen_set_tone(&p->test_gen, values[5]);
+    }
+    if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
+        p->ear_scale = values[6];
+        if (p->core) hrtf_set_ear_scale(p->core, values[6]);
     }
 
     return true;

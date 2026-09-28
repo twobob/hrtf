@@ -802,7 +802,7 @@ int main()
         }
     }
 
-    // State Serialisation & Legacy Migration tests
+    // State Serialisation tests
     if (comp)
     {
         TestMemStream saveStream;
@@ -843,53 +843,6 @@ int main()
                 else
                 {
                     std::cerr << "ERROR: VST3 processor state round-trip stream mismatch after restore.\n";
-                    ++failures;
-                }
-            }
-        }
-
-        // Test legacy v1 state migration
-        {
-            TestMemStream v1Stream;
-            Steinberg::int32 v1 = 1;
-            double dNorm = 0.25;
-            double rNorm = 0.75;
-            v1Stream.writeVal(v1);
-            v1Stream.writeVal(dNorm);
-            v1Stream.writeVal(rNorm);
-            v1Stream.cursor = 0;
-
-            res = comp->setState(&v1Stream);
-            if (res != Steinberg::kResultOk)
-            {
-                std::cerr << "ERROR: comp->setState() failed on legacy v1 state\n";
-                ++failures;
-            }
-            else
-            {
-                TestMemStream migratedStream;
-                comp->getState(&migratedStream);
-                migratedStream.cursor = 0;
-                Steinberg::int32 ver = 0;
-                double md = 0, mr = 0, me = 0, ms = 0, mp = 0, mt = 0, mes = 0;
-                migratedStream.readVal(ver);
-                migratedStream.readVal(md);
-                migratedStream.readVal(mr);
-                migratedStream.readVal(me);
-                migratedStream.readVal(ms);
-                migratedStream.readVal(mp);
-                migratedStream.readVal(mt);
-                migratedStream.readVal(mes);
-
-                if (ver == 4 && std::fabs(md - 0.25) < 1e-6 && std::fabs(mr - 0.75) < 1e-6 &&
-                    std::fabs(me - 0.5) < 1e-6 && std::fabs(ms - 0.15) < 1e-6 &&
-                    std::fabs(mp - 0.0) < 1e-6 && std::fabs(mt - 0.5) < 1e-6 && std::fabs(mes - 0.5) < 1e-6)
-                {
-                    std::cout << "SUCCESS: VST3 legacy v1 state migration loaded correctly and reset unrepresented parameters to factory defaults.\n";
-                }
-                else
-                {
-                    std::cerr << "ERROR: VST3 legacy v1 state migration values mismatch!\n";
                     ++failures;
                 }
             }

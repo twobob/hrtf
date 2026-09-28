@@ -339,11 +339,17 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != kStateVersion) return Steinberg::kResultFalse;
 
-    double dNorm = 0.0, rNorm = 0.0;
+    double dNorm = 0.0, rNorm = 0.0, eNorm = 0.0, sNorm = 0.0;
+    double pNorm = 0.0, tNorm = 0.0, esNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
     if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
 
     /* Out-of-range or non-finite values are ignored rather than pushed into
        the core, where they would poison the DSP state for the session. */
@@ -351,57 +357,19 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
         mDistanceNorm = dNorm;
     if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
         mRotationNorm = rNorm;
-
-    if (version >= 2)
+    if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
+        mElevationNorm = eNorm;
+    if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
+        mSpaceNorm = sNorm;
+    if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
+        mTestPulseNorm = pNorm;
+    if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
     {
-        double eNorm = 0.5, sNorm = 0.15;
-        if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
-        if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
-            mElevationNorm = eNorm;
-        if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
-            mSpaceNorm = sNorm;
+        mTestToneNorm = tNorm;
+        hrtf_test_gen_set_tone (&mTestGen, tNorm);
     }
-    else
-    {
-        mElevationNorm = 0.5;
-        mSpaceNorm = 0.15;
-    }
-
-    if (version >= 3)
-    {
-        double pNorm = 0.0;
-        if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
-            mTestPulseNorm = pNorm;
-    }
-    else
-    {
-        mTestPulseNorm = 0.0;
-    }
-
-    if (version >= 4)
-    {
-        double tNorm = 0.5, esNorm = 0.5;
-        if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
-        if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
-        {
-            mTestToneNorm = tNorm;
-            hrtf_test_gen_set_tone (&mTestGen, tNorm);
-        }
-        if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
-            mEarScaleNorm = esNorm;
-    }
-    else
-    {
-        mTestToneNorm = 0.5;
-        hrtf_test_gen_set_tone (&mTestGen, 0.5);
-        mEarScaleNorm = 0.5;
-    }
+    if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
+        mEarScaleNorm = esNorm;
 
     if (mCore)
     {

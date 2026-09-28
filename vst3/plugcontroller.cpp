@@ -71,63 +71,32 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
 
     Steinberg::int32 version = 0;
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
-    if (version != 1 && version != 2 && version != 3 && version != kStateVersion) return Steinberg::kResultFalse;
+    if (version != kStateVersion) return Steinberg::kResultFalse;
 
-    double dNorm = 0.0, rNorm = 0.0;
+    double dNorm = 0.0, rNorm = 0.0, eNorm = 0.0, sNorm = 0.0;
+    double pNorm = 0.0, tNorm = 0.0, esNorm = 0.0;
     if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
     if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
+    if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
 
     if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
         setParamNormalized (kParamDistance, dNorm);
     if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
         setParamNormalized (kParamRotation, rNorm);
-
-    if (version >= 2)
-    {
-        double eNorm = 0.5, sNorm = 0.15;
-        if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
-        if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
-            setParamNormalized (kParamElevation, eNorm);
-        if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
-            setParamNormalized (kParamSpace, sNorm);
-    }
-    else
-    {
-        setParamNormalized (kParamElevation, 0.5);
-        setParamNormalized (kParamSpace, 0.15);
-    }
-
-    if (version >= 3)
-    {
-        double pNorm = 0.0;
-        if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
-            setParamNormalized (kParamTestPulse, pNorm);
-    }
-    else
-    {
-        setParamNormalized (kParamTestPulse, 0.0);
-    }
-
-    if (version >= 4)
-    {
-        double tNorm = 0.5, esNorm = 0.5;
-        if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
-        if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
-
-        if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
-            setParamNormalized (kParamTestTone, tNorm);
-        if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
-            setParamNormalized (kParamEarScale, esNorm);
-    }
-    else
-    {
-        setParamNormalized (kParamTestTone, 0.5);
-        setParamNormalized (kParamEarScale, 0.5);
-    }
+    if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
+        setParamNormalized (kParamElevation, eNorm);
+    if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
+        setParamNormalized (kParamSpace, sNorm);
+    if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
+        setParamNormalized (kParamTestPulse, pNorm);
+    if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
+        setParamNormalized (kParamTestTone, tNorm);
+    if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
+        setParamNormalized (kParamEarScale, esNorm);
 
     return Steinberg::kResultOk;
 }

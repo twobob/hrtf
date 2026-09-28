@@ -526,40 +526,11 @@ int main(void) {
             if (fabs(es_val - 1.15) > 1e-9) {
                 printf("ERROR: ear scale was not restored (got %f)\n", es_val);
                 ++failures;
-            } else {
-                printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
-
-            /* Verify legacy state v1 migration: resets unrepresented parameters to defaults */
-            {
-                MemStream v1_mem;
-                memset(&v1_mem, 0, sizeof(v1_mem));
-                memcpy(v1_mem.data, "HRTF", 4);
-                uint32_t v1_hdr = 1;
-                double v1_data[2] = { 4.5, 0.25 };
-                memcpy(v1_mem.data + 4, &v1_hdr, sizeof(v1_hdr));
-                memcpy(v1_mem.data + 8, v1_data, sizeof(v1_data));
-                v1_mem.size = 8 + sizeof(v1_data);
-
-                clap_istream_t in_str = { &v1_mem, mem_read };
-                if (!state->load(plugin, &in_str)) {
-                    printf("ERROR: failed to load legacy v1 state stream\n");
-                    ++failures;
-                } else {
-                    double d1 = 0, r1 = 0, s1 = 0, es1 = 0;
-                    params->get_value(plugin, 1, &d1);
-                    params->get_value(plugin, 2, &r1);
-                    params->get_value(plugin, 4, &s1);
-                    params->get_value(plugin, 7, &es1);
-                    if (fabs(d1 - 4.5) < 1e-9 && fabs(r1 - 0.25) < 1e-9 &&
-                        fabs(s1 - 0.15) < 1e-9 && fabs(es1 - 1.0) < 1e-9) {
-                        printf("SUCCESS: legacy v1 state correctly loaded and reset new parameters to defaults.\n");
-                    } else {
-                        printf("ERROR: legacy v1 state migration failed (d=%f, r=%f, s=%f, es=%f)\n",
-                               d1, r1, s1, es1);
-                        ++failures;
-                    }
-                }
+            if (fabs(d - 8.0) <= 1e-9 && fabs(r - 0.75) <= 1e-9 && fabs(e - 30.0) <= 1e-9 &&
+                fabs(s - 0.40) <= 1e-9 && fabs(p_val - 1.0) <= 1e-9 && fabs(t_val - 0.85) <= 1e-9 &&
+                fabs(es_val - 1.15) <= 1e-9) {
+                printf("SUCCESS: state round-trip preserved all 7 parameters.\n");
             }
 
             /* Test near-field ITD delay without aliasing: d = 5 cm, ear_scale = 1.30, 90 deg right */
