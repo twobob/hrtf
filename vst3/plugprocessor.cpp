@@ -7,6 +7,23 @@
 #include <cmath>
 #include <vector>
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+
+struct ScopedFtzDaz {
+    unsigned int old_mxcsr;
+    ScopedFtzDaz () : old_mxcsr (_mm_getcsr ()) {
+        _mm_setcsr (old_mxcsr | 0x8040); /* Enable FTZ (bit 15) and DAZ (bit 6) */
+    }
+    ~ScopedFtzDaz () {
+        _mm_setcsr (old_mxcsr);
+    }
+};
+#else
+struct ScopedFtzDaz {};
+#endif
+
 namespace RotatingHrtf {
 
 PlugProcessor::PlugProcessor ()
@@ -65,10 +82,9 @@ Steinberg::tresult PLUGIN_API PlugProcessor::canProcessSampleSize (Steinberg::in
 
 Steinberg::tresult PLUGIN_API PlugProcessor::setupProcessing (Steinberg::Vst::ProcessSetup& setup)
 {
-    mSampleRate = setup.sampleRate;
     mMonoBuffer.resize (setup.maxSamplesPerBlock > 0 ? setup.maxSamplesPerBlock : 1024);
-    hrtf_test_gen_init (&mTestGen, mSampleRate);
-    hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm);
+    hrtf_test_gen_init (&mTestGen, setup.sampleRate);
+    hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm.load (std::memory_order_relaxed));
     return AudioEffect::setupProcessing (setup);
 }
 
@@ -81,16 +97,15 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
             hrtf_destroy (mCore);
             mCore = nullptr;
         }
-        size_t maxBlock = processSetup.maxSamplesPerBlock > 0 ? (size_t)processSetup.maxSamplesPerBlock : 1024;
-        mCore = hrtf_create (processSetup.sampleRate, maxBlock);
+        mCore = hrtf_create (processSetup.sampleRate);
         if (mCore)
         {
-            double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
-            double ear_scale = 0.70 + mEarScaleNorm * 0.60;
+            double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
+            double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
             hrtf_set_distance (mCore, dist_m);
-            hrtf_set_rotation_phase (mCore, mRotationNorm);
-            hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
-            hrtf_set_space (mCore, mSpaceNorm);
+            hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
+            hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
+            hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
             hrtf_set_ear_scale (mCore, ear_scale);
             hrtf_reset (mCore);
         }
@@ -140,40 +155,40 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
 
     if (id == kParamDistance)
     {
-        mDistanceNorm = value;
+        mDistanceNorm.store (value, std::memory_order_relaxed);
         if (mCore)
             hrtf_set_distance (mCore, 0.05 + value * (20.0 - 0.05));
     }
     else if (id == kParamRotation)
     {
-        mRotationNorm = value;
+        mRotationNorm.store (value, std::memory_order_relaxed);
         if (mCore)
             hrtf_set_rotation_phase (mCore, value);
     }
     else if (id == kParamElevation)
     {
-        mElevationNorm = value;
+        mElevationNorm.store (value, std::memory_order_relaxed);
         if (mCore)
             hrtf_set_elevation_deg (mCore, -90.0 + value * 180.0);
     }
     else if (id == kParamSpace)
     {
-        mSpaceNorm = value;
+        mSpaceNorm.store (value, std::memory_order_relaxed);
         if (mCore)
             hrtf_set_space (mCore, value);
     }
     else if (id == kParamTestPulse)
     {
-        mTestPulseNorm = value;
+        mTestPulseNorm.store (value, std::memory_order_relaxed);
     }
     else if (id == kParamTestTone)
     {
-        mTestToneNorm = value;
+        mTestToneNorm.store (value, std::memory_order_relaxed);
         hrtf_test_gen_set_tone (&mTestGen, value);
     }
     else if (id == kParamEarScale)
     {
-        mEarScaleNorm = value;
+        mEarScaleNorm.store (value, std::memory_order_relaxed);
         if (mCore)
             hrtf_set_ear_scale (mCore, 0.70 + value * 0.60);
     }
@@ -181,8 +196,8 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
 
 Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessData& data)
 {
-    /* Parameter changes are honoured at the sample offset the host asked
-       for, not applied to the whole block from its first sample. */
+    ScopedFtzDaz ftzDaz;
+
     /* Parameter changes are honoured at the sample offset the host asked
        for, not applied to the whole block from its first sample.
        Fixed stack array of 64 queues accommodates >9x the plugin's 7 parameters
@@ -284,7 +299,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
             if (next <= cursor) break; /* no forward progress: stop rather than spin */
 
             const Steinberg::int32 sliceFrames = next - cursor;
-            if (mTestPulseNorm >= 0.5)
+            if (mTestPulseNorm.load (std::memory_order_relaxed) >= 0.5)
             {
                 double bpm = 120.0;
                 double beatPos = 0.0;
@@ -307,9 +322,9 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
                     }
                 }
                 double sliceBeat = beatPos;
-                if (isPlaying && mSampleRate > 1000.0)
+                if (isPlaying && processSetup.sampleRate > 1000.0)
                 {
-                    sliceBeat += (double)cursor * (bpm / (60.0 * mSampleRate));
+                    sliceBeat += (double)cursor * (bpm / (60.0 * processSetup.sampleRate));
                 }
                 hrtf_test_gen_process (&mTestGen, mono, (size_t)sliceFrames, bpm, sliceBeat, isPlaying);
             }
@@ -354,31 +369,31 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
     /* Out-of-range or non-finite values are ignored rather than pushed into
        the core, where they would poison the DSP state for the session. */
     if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
-        mDistanceNorm = dNorm;
+        mDistanceNorm.store (dNorm, std::memory_order_relaxed);
     if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
-        mRotationNorm = rNorm;
+        mRotationNorm.store (rNorm, std::memory_order_relaxed);
     if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
-        mElevationNorm = eNorm;
+        mElevationNorm.store (eNorm, std::memory_order_relaxed);
     if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
-        mSpaceNorm = sNorm;
+        mSpaceNorm.store (sNorm, std::memory_order_relaxed);
     if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
-        mTestPulseNorm = pNorm;
+        mTestPulseNorm.store (pNorm, std::memory_order_relaxed);
     if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
     {
-        mTestToneNorm = tNorm;
+        mTestToneNorm.store (tNorm, std::memory_order_relaxed);
         hrtf_test_gen_set_tone (&mTestGen, tNorm);
     }
     if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
-        mEarScaleNorm = esNorm;
+        mEarScaleNorm.store (esNorm, std::memory_order_relaxed);
 
     if (mCore)
     {
-        double dist_m = 0.05 + mDistanceNorm * (20.0 - 0.05);
-        double ear_scale = 0.70 + mEarScaleNorm * 0.60;
+        double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
+        double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
         hrtf_set_distance (mCore, dist_m);
-        hrtf_set_rotation_phase (mCore, mRotationNorm);
-        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm * 180.0);
-        hrtf_set_space (mCore, mSpaceNorm);
+        hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
+        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
+        hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
         hrtf_set_ear_scale (mCore, ear_scale);
     }
 
@@ -391,13 +406,13 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     Steinberg::IBStreamer streamer (state);
 
     streamer.writeInt32 (kStateVersion);
-    streamer.writeDouble (mDistanceNorm);
-    streamer.writeDouble (mRotationNorm);
-    streamer.writeDouble (mElevationNorm);
-    streamer.writeDouble (mSpaceNorm);
-    streamer.writeDouble (mTestPulseNorm);
-    streamer.writeDouble (mTestToneNorm);
-    streamer.writeDouble (mEarScaleNorm);
+    streamer.writeDouble (mDistanceNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mRotationNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mElevationNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mSpaceNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mTestPulseNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mTestToneNorm.load (std::memory_order_relaxed));
+    streamer.writeDouble (mEarScaleNorm.load (std::memory_order_relaxed));
 
     return Steinberg::kResultOk;
 }

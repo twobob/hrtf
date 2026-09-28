@@ -15,6 +15,32 @@
 #include <stdio.h>
 #include <errno.h>
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
+
+#if defined(_MSC_VER)
+#include <intrin.h>
+static inline void set_atomic_double(volatile double *target, double val) {
+    union { double d; __int64 i; } u;
+    u.d = val;
+    _InterlockedExchange64((volatile __int64 *)target, u.i);
+}
+static inline double get_atomic_double(const volatile double *target) {
+    union { double d; __int64 i; } u;
+    u.i = _InterlockedCompareExchange64((volatile __int64 *)target, 0, 0);
+    return u.d;
+}
+#else
+static inline void set_atomic_double(volatile double *target, double val) {
+    *target = val;
+}
+static inline double get_atomic_double(const volatile double *target) {
+    return *target;
+}
+#endif
+
 #include "hrtf_core.h"
 
 #define PLUGIN_ID "com.example.rotating-hrtf-v2"
@@ -34,18 +60,16 @@ enum {
 
 typedef struct {
     clap_plugin_t plugin;
-    const clap_host_t *host;
     HrtfCore *core;
     double sample_rate;
-    double distance_m;
-    double rotation_phase;
-    double elevation_deg;
-    double space;
-    double test_pulse;
-    double test_tone;
-    double ear_scale;
+    volatile double distance_m;
+    volatile double rotation_phase;
+    volatile double elevation_deg;
+    volatile double space;
+    volatile double test_pulse;
+    volatile double test_tone;
+    volatile double ear_scale;
     HrtfTestGen test_gen;
-    bool active;
     float *silence;            /* zeros, used when the input port is inactive */
     size_t silence_frames;
     float *test_buf;           /* scratch buffer for synthesised test pulses */
@@ -88,16 +112,15 @@ static bool plugin_init(const clap_plugin_t *plugin)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     p->sample_rate = 48000.0;
-    p->distance_m = 2.0;
-    p->rotation_phase = 0.0;
-    p->elevation_deg = 0.0;
-    p->space = 0.15;
-    p->test_pulse = 0.0;
-    p->test_tone = 0.5;
-    p->ear_scale = 1.0;
+    set_atomic_double(&p->distance_m, 2.0);
+    set_atomic_double(&p->rotation_phase, 0.0);
+    set_atomic_double(&p->elevation_deg, 0.0);
+    set_atomic_double(&p->space, 0.15);
+    set_atomic_double(&p->test_pulse, 0.0);
+    set_atomic_double(&p->test_tone, 0.5);
+    set_atomic_double(&p->ear_scale, 1.0);
     hrtf_test_gen_init(&p->test_gen, p->sample_rate);
-    hrtf_test_gen_set_tone(&p->test_gen, p->test_tone);
-    p->active = false;
+    hrtf_test_gen_set_tone(&p->test_gen, 0.5);
     return true;
 }
 
@@ -125,7 +148,7 @@ static bool plugin_activate(const clap_plugin_t *plugin,
     }
 
     p->sample_rate = sample_rate;
-    p->core = hrtf_create(sample_rate, max_frames_count);
+    p->core = hrtf_create(sample_rate);
     if (!p->core) return false;
 
     free(p->silence);
@@ -146,22 +169,20 @@ static bool plugin_activate(const clap_plugin_t *plugin,
         return false;
     }
 
-    hrtf_set_distance(p->core, p->distance_m);
-    hrtf_set_rotation_phase(p->core, p->rotation_phase);
-    hrtf_set_elevation_deg(p->core, p->elevation_deg);
-    hrtf_set_space(p->core, p->space);
-    hrtf_set_ear_scale(p->core, p->ear_scale);
+    hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
+    hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
+    hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
+    hrtf_set_space(p->core, get_atomic_double(&p->space));
+    hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
     hrtf_test_gen_init(&p->test_gen, sample_rate);
-    hrtf_test_gen_set_tone(&p->test_gen, p->test_tone);
+    hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
     hrtf_reset(p->core);
-    p->active = true;
     return true;
 }
 
 static void plugin_deactivate(const clap_plugin_t *plugin)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
-    p->active = false;
     if (p->core) {
         hrtf_destroy(p->core);
         p->core = NULL;
@@ -188,10 +209,11 @@ static void plugin_reset(const clap_plugin_t *plugin)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!p->core) return;
-    hrtf_set_distance(p->core, p->distance_m);
-    hrtf_set_rotation_phase(p->core, p->rotation_phase);
-    hrtf_set_elevation_deg(p->core, p->elevation_deg);
-    hrtf_set_space(p->core, p->space);
+    hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
+    hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
+    hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
+    hrtf_set_space(p->core, get_atomic_double(&p->space));
+    hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
     hrtf_reset(p->core);
 }
 
@@ -320,31 +342,31 @@ static bool params_get_value(const clap_plugin_t *plugin,
     if (!out_value) return false;
 
     if (param_id == PARAM_DISTANCE) {
-        *out_value = p->distance_m;
+        *out_value = get_atomic_double(&p->distance_m);
         return true;
     }
     if (param_id == PARAM_ROTATION) {
-        *out_value = p->rotation_phase;
+        *out_value = get_atomic_double(&p->rotation_phase);
         return true;
     }
     if (param_id == PARAM_ELEVATION) {
-        *out_value = p->elevation_deg;
+        *out_value = get_atomic_double(&p->elevation_deg);
         return true;
     }
     if (param_id == PARAM_SPACE) {
-        *out_value = p->space;
+        *out_value = get_atomic_double(&p->space);
         return true;
     }
     if (param_id == PARAM_TEST_PULSE) {
-        *out_value = p->test_pulse;
+        *out_value = get_atomic_double(&p->test_pulse);
         return true;
     }
     if (param_id == PARAM_TEST_TONE) {
-        *out_value = p->test_tone;
+        *out_value = get_atomic_double(&p->test_tone);
         return true;
     }
     if (param_id == PARAM_EAR_SCALE) {
-        *out_value = p->ear_scale;
+        *out_value = get_atomic_double(&p->ear_scale);
         return true;
     }
     return false;
@@ -513,34 +535,34 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
     if (id == PARAM_DISTANCE) {
         if (value < 0.05) value = 0.05;
         if (value > 20.0) value = 20.0;
-        p->distance_m = value;
+        set_atomic_double(&p->distance_m, value);
         if (p->core) hrtf_set_distance(p->core, value);
     } else if (id == PARAM_ROTATION) {
         value -= floor(value);
         if (value < 0.0) value += 1.0;
-        p->rotation_phase = value;
+        set_atomic_double(&p->rotation_phase, value);
         if (p->core) hrtf_set_rotation_phase(p->core, value);
     } else if (id == PARAM_ELEVATION) {
         if (value < -90.0) value = -90.0;
         if (value > 90.0) value = 90.0;
-        p->elevation_deg = value;
+        set_atomic_double(&p->elevation_deg, value);
         if (p->core) hrtf_set_elevation_deg(p->core, value);
     } else if (id == PARAM_SPACE) {
         if (value < 0.0) value = 0.0;
         if (value > 1.0) value = 1.0;
-        p->space = value;
+        set_atomic_double(&p->space, value);
         if (p->core) hrtf_set_space(p->core, value);
     } else if (id == PARAM_TEST_PULSE) {
-        p->test_pulse = (value >= 0.5) ? 1.0 : 0.0;
+        set_atomic_double(&p->test_pulse, (value >= 0.5) ? 1.0 : 0.0);
     } else if (id == PARAM_TEST_TONE) {
         if (value < 0.0) value = 0.0;
         if (value > 1.0) value = 1.0;
-        p->test_tone = value;
+        set_atomic_double(&p->test_tone, value);
         hrtf_test_gen_set_tone(&p->test_gen, value);
     } else if (id == PARAM_EAR_SCALE) {
         if (value < 0.70) value = 0.70;
         if (value > 1.30) value = 1.30;
-        p->ear_scale = value;
+        set_atomic_double(&p->ear_scale, value);
         if (p->core) hrtf_set_ear_scale(p->core, value);
     }
 }
@@ -586,13 +608,13 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     if (!stream || !stream->write) return false;
 
     double values[7];
-    values[0] = p->distance_m;
-    values[1] = p->rotation_phase;
-    values[2] = p->elevation_deg;
-    values[3] = p->space;
-    values[4] = p->test_pulse;
-    values[5] = p->test_tone;
-    values[6] = p->ear_scale;
+    values[0] = get_atomic_double(&p->distance_m);
+    values[1] = get_atomic_double(&p->rotation_phase);
+    values[2] = get_atomic_double(&p->elevation_deg);
+    values[3] = get_atomic_double(&p->space);
+    values[4] = get_atomic_double(&p->test_pulse);
+    values[5] = get_atomic_double(&p->test_tone);
+    values[6] = get_atomic_double(&p->ear_scale);
 
     if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
         return false;
@@ -620,31 +642,31 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     double values[7];
     if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
     if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-        p->distance_m = values[0];
+        set_atomic_double(&p->distance_m, values[0]);
         if (p->core) hrtf_set_distance(p->core, values[0]);
     }
     if (isfinite(values[1])) {
         double phase = wrap_unit(values[1]);
-        p->rotation_phase = phase;
+        set_atomic_double(&p->rotation_phase, phase);
         if (p->core) hrtf_set_rotation_phase(p->core, phase);
     }
     if (isfinite(values[2]) && values[2] >= -90.0 && values[2] <= 90.0) {
-        p->elevation_deg = values[2];
+        set_atomic_double(&p->elevation_deg, values[2]);
         if (p->core) hrtf_set_elevation_deg(p->core, values[2]);
     }
     if (isfinite(values[3]) && values[3] >= 0.0 && values[3] <= 1.0) {
-        p->space = values[3];
+        set_atomic_double(&p->space, values[3]);
         if (p->core) hrtf_set_space(p->core, values[3]);
     }
     if (isfinite(values[4]) && values[4] >= 0.0 && values[4] <= 1.0) {
-        p->test_pulse = (values[4] >= 0.5) ? 1.0 : 0.0;
+        set_atomic_double(&p->test_pulse, (values[4] >= 0.5) ? 1.0 : 0.0);
     }
     if (isfinite(values[5]) && values[5] >= 0.0 && values[5] <= 1.0) {
-        p->test_tone = values[5];
+        set_atomic_double(&p->test_tone, values[5]);
         hrtf_test_gen_set_tone(&p->test_gen, values[5]);
     }
     if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
-        p->ear_scale = values[6];
+        set_atomic_double(&p->ear_scale, values[6]);
         if (p->core) hrtf_set_ear_scale(p->core, values[6]);
     }
 
@@ -694,6 +716,11 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     if (process->frames_count > p->silence_frames)
         return CLAP_PROCESS_ERROR; /* host broke the max_frames_count contract */
 
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    const unsigned int old_mxcsr = _mm_getcsr();
+    _mm_setcsr(old_mxcsr | 0x8040); /* Enable FTZ (bit 15) and DAZ (bit 6) */
+#endif
+
     const float *src = input_active ? in->data32[0] : p->silence;
     float *dst_l = out->data32[0];
     float *dst_r = out->data32[1];
@@ -726,7 +753,7 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
             const uint32_t slice = next - cursor;
             const float *segment_src = NULL;
 
-            if (p->test_pulse >= 0.5) {
+            if (get_atomic_double(&p->test_pulse) >= 0.5) {
                 double bpm = 120.0;
                 double beat_pos = 0.0;
                 int is_playing = 0;
@@ -776,6 +803,10 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
            If the event list contains pathological duplicate/old timestamps,
            the event index still advances, preventing an infinite loop. */
     }
+
+#if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
+    _mm_setcsr(old_mxcsr);
+#endif
 
     return CLAP_PROCESS_CONTINUE;
 }
@@ -827,7 +858,7 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *factory,
     RotatingHrtf *p = (RotatingHrtf *)calloc(1, sizeof(*p));
     if (!p) return NULL;
 
-    p->host = host;
+    (void)host;
     p->distance_m = 2.0;
     p->rotation_phase = 0.0;
     p->elevation_deg = 0.0;

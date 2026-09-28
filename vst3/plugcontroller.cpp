@@ -98,6 +98,9 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
     if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
         setParamNormalized (kParamEarScale, esNorm);
 
+    if (componentHandler)
+        componentHandler->restartComponent (Steinberg::Vst::kParamValuesChanged);
+
     return Steinberg::kResultOk;
 }
 
