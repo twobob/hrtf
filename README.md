@@ -54,21 +54,21 @@ Positions are calculated using spherical coordinate conventions:
 
 ### 2. Interaural Time Difference (ITD)
 Calculated via Woodworth's spherical head acoustic ray-tracing model coupled with 4-point Hermite cubic fractional delay interpolation:
-$$\text{woodworth\_scale}(\theta) = \frac{\sin\theta_{\text{lat}} + \theta_{\text{lat}}}{1.0 + \frac{\pi}{2}}$$
-$$\text{ITD}(s, d, \alpha) = \text{HRTF\_MAX\_ITD\_S} \cdot \text{woodworth\_scale}(\theta) \cdot \text{nf\_itd\_scale}(d) \cdot \alpha$$
+$$\text{scale}_{\text{woodworth}}(\theta) = \frac{\sin\theta_{\text{lat}} + \theta_{\text{lat}}}{1.0 + \frac{\pi}{2}}$$
+$$\text{ITD}(s, d, \alpha) = \text{ITD}_{\max} \cdot \text{scale}_{\text{woodworth}}(\theta) \cdot \text{scale}_{\text{nf}}(d) \cdot \alpha$$
 where:
-- $\text{HRTF\_MAX\_ITD\_S} = 0.70\text{ ms}$ (reference cranial diameter).
+- $\text{ITD}_{\max} = 0.70\text{ ms}$ (`HRTF_MAX_ITD_S`, reference cranial diameter).
 - $\theta_{\text{lat}} = \arcsin(|s|)$ represents the lateral incident angle, eliminating the $\sim 0.12\text{ ms}$ over-estimate of sinusoidal models at intermediate angles ($30^\circ\text{--}60^\circ$).
 - 4-point Hermite cubic spline interpolation ensures a flat passband up to Nyquist without angle-dependent comb filtering on the far ear.
-- $\text{nf\_itd\_scale}(d) = 1.0 + \left(\frac{0.00765}{2 d^2 + 0.00765} - \text{offset}\right)$ accounts for spherical wavefront curvature increase at distances $d < 1\text{ m}$, continuous at $1\text{ m}$.
+- $\text{scale}_{\text{nf}}(d) = 1.0 + \left(\frac{0.00765}{2 d^2 + 0.00765} - \text{offset}\right)$ (`nf_itd_scale`) accounts for spherical wavefront curvature increase at distances $d < 1\text{ m}$, continuous at $1\text{ m}$.
 - $\alpha \in [0.70, 1.30]$ is the anthropometric **Ear Scale** parameter.
 
 ### 3. Frequency-Dependent Interaural Level Difference (ILD)
 Head shadow models frequency-dependent diffraction around the cranial sphere:
-- **Low-Frequency Cranial Diffraction**: Sounds below $500\text{ Hz}$ bend around the skull with modest loss (broadband contralateral shadow of $-4.0\text{ dB}$, $\text{far\_gain} = 0.6310$).
+- **Low-Frequency Cranial Diffraction**: Sounds below $500\text{ Hz}$ bend around the skull with modest loss (broadband contralateral shadow of $-4.0\text{ dB}$, $g_{\text{far}} = 0.6310$).
 - **Contralateral High-Frequency Shadow**: The pinna/air high-shelf cascade introduces an additional $-9.0\text{ dB}$ attenuation on the far ear (totaling $-13.0\text{ dB}$ HF shadow), accurately matching measured human HRIRs.
 - Ipsilateral and contralateral gains are normalised to maintain acoustic energy balance:
-  $$g_L = 1 - s(1 - \text{far\_gain}), \quad g_R = 1, \quad \text{norm} = \sqrt{\frac{g_L^2 + g_R^2}{2}}$$
+  $$g_L = 1 - s(1 - g_{\text{far}}), \quad g_R = 1, \quad g_{\text{norm}} = \sqrt{\frac{g_L^2 + g_R^2}{2}}$$
 
 ### 4. Anthropometric Pinna Spectral Cues
 Five cascading biquad filters in transposed direct-form II dynamically shape frequency content based on orientation and scale factor $\alpha$:
