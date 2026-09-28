@@ -54,7 +54,18 @@ Both parameters feature smooth exponential slewing (20 ms for rotation, 50 ms fo
 
 ## Building from Source
 
-Prerequisites:
+### Getting the source
+
+The VST3 SDK (`public.sdk`, `base`, `pluginterfaces`), the CLAP headers (`clap-src`) and `clap-wrapper` are git submodules. Clone recursively so the tree is buildable straight away:
+
+```cmd
+git clone --recurse-submodules <repository-url>
+```
+
+Already have a clone without them? `git submodule update --init --recursive` populates them in place — no junctions, symlinks or manual copying required.
+
+### Prerequisites
+
 - Visual Studio 2022 (with MSVC C/C++ x64 tools)
 
 To build both the CLAP plugin, VST3 plugin, and execute the automated verification test suite:

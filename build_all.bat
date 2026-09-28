@@ -1,6 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: ---------------------------------------------------------------
+:: Fail fast if the vendored SDK submodules are not checked out.
+:: ---------------------------------------------------------------
+if not exist "public.sdk\source\vst\vstaudioeffect.h" goto missing_submodules
+if not exist "base\source\baseiids.cpp"               goto missing_submodules
+if not exist "pluginterfaces\base\funknown.cpp"       goto missing_submodules
+if not exist "clap-src\include\clap\clap.h"           goto missing_submodules
+
 call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
 if errorlevel 1 exit /b 1
 
@@ -104,3 +112,12 @@ echo   - RotatingHRTF_v2.clap (CLAP plugin for Bitwig, Reaper, etc.)
 echo   - RotatingHRTF_v2.vst3 (VST3 plugin for Ableton Live)
 echo   - bundle\RotatingHRTF_v2.vst3\ (VST3 bundle structure)
 echo ========================================================
+
+exit /b 0
+
+:missing_submodules
+echo.
+echo ERROR: vendored SDK submodules are missing from this checkout.
+echo        Fix with:  git submodule update --init --recursive
+echo.
+exit /b 1
