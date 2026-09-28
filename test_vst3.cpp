@@ -2,13 +2,83 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 #include "pluginterfaces/base/ipluginbase.h"
+#include "pluginterfaces/base/ibstream.h"
 #include "pluginterfaces/vst/ivstaudioprocessor.h"
 #include "pluginterfaces/vst/ivstcomponent.h"
 #include "pluginterfaces/vst/ivsteditcontroller.h"
 #include "pluginterfaces/vst/ivstparameterchanges.h"
 #include "vst3/plugids.h"
+
+class TestMemStream : public Steinberg::IBStream
+{
+public:
+    std::vector<Steinberg::uint8> buffer;
+    Steinberg::int64 cursor = 0;
+
+    Steinberg::tresult PLUGIN_API queryInterface (const Steinberg::TUID, void**) override { return Steinberg::kNoInterface; }
+    Steinberg::uint32 PLUGIN_API addRef () override { return 1; }
+    Steinberg::uint32 PLUGIN_API release () override { return 1; }
+
+    Steinberg::tresult PLUGIN_API read (void* dest, Steinberg::int32 numBytes, Steinberg::int32* numBytesRead) override
+    {
+        if (numBytes < 0) return Steinberg::kInvalidArgument;
+        Steinberg::int64 available = (Steinberg::int64)buffer.size () - cursor;
+        if (available < 0) available = 0;
+        Steinberg::int32 toRead = (Steinberg::int32)(numBytes < available ? numBytes : available);
+        if (toRead > 0)
+        {
+            std::memcpy (dest, buffer.data () + cursor, toRead);
+            cursor += toRead;
+        }
+        if (numBytesRead) *numBytesRead = toRead;
+        return toRead == numBytes ? Steinberg::kResultTrue : Steinberg::kResultFalse;
+    }
+
+    Steinberg::tresult PLUGIN_API write (void* src, Steinberg::int32 numBytes, Steinberg::int32* numBytesWritten) override
+    {
+        if (numBytes < 0) return Steinberg::kInvalidArgument;
+        if (cursor + numBytes > (Steinberg::int64)buffer.size ())
+            buffer.resize ((size_t)(cursor + numBytes));
+        std::memcpy (buffer.data () + cursor, src, numBytes);
+        cursor += numBytes;
+        if (numBytesWritten) *numBytesWritten = numBytes;
+        return Steinberg::kResultTrue;
+    }
+
+    template <typename T>
+    Steinberg::tresult writeVal (const T& val)
+    {
+        return write ((void*)&val, (Steinberg::int32)sizeof(T), nullptr);
+    }
+
+    template <typename T>
+    Steinberg::tresult readVal (T& val)
+    {
+        return read ((void*)&val, (Steinberg::int32)sizeof(T), nullptr);
+    }
+
+    Steinberg::tresult PLUGIN_API seek (Steinberg::int64 pos, Steinberg::int32 mode, Steinberg::int64* result) override
+    {
+        Steinberg::int64 newPos = cursor;
+        if (mode == kIBSeekSet) newPos = pos;
+        else if (mode == kIBSeekCur) newPos += pos;
+        else if (mode == kIBSeekEnd) newPos = (Steinberg::int64)buffer.size () + pos;
+        if (newPos < 0) return Steinberg::kInvalidArgument;
+        cursor = newPos;
+        if (result) *result = cursor;
+        return Steinberg::kResultTrue;
+    }
+
+    Steinberg::tresult PLUGIN_API tell (Steinberg::int64* pos) override
+    {
+        if (!pos) return Steinberg::kInvalidArgument;
+        *pos = cursor;
+        return Steinberg::kResultTrue;
+    }
+};
 
 class DummyQueue : public Steinberg::Vst::IParamValueQueue
 {
@@ -210,6 +280,17 @@ int main()
         }
         controller->terminate();
         controller->release();
+    }
+
+    // Latency Declaration test
+    if (processor->getLatencySamples() != 2)
+    {
+        std::cerr << "ERROR: processor reported " << processor->getLatencySamples() << " latency samples, expected 2\n";
+        ++failures;
+    }
+    else
+    {
+        std::cout << "SUCCESS: VST3 processor correctly declared 2 samples of latency.\n";
     }
 
     // Process audio test block
@@ -718,6 +799,100 @@ int main()
         else
         {
             std::cout << "SUCCESS: process() survived a null input buffer array.\n";
+        }
+    }
+
+    // State Serialisation & Legacy Migration tests
+    if (comp)
+    {
+        TestMemStream saveStream;
+        Steinberg::tresult res = comp->getState(&saveStream);
+        if (res != Steinberg::kResultOk || saveStream.buffer.size() != 60)
+        {
+            std::cerr << "ERROR: comp->getState() failed or returned unexpected byte count (" << saveStream.buffer.size() << ", expected 60)\n";
+            ++failures;
+        }
+        else
+        {
+            // Modify a parameter via DummyChanges to prove restore is effective
+            DummyChanges modChanges;
+            modChanges.q.id = 100; // Distance
+            modChanges.q.val = 0.85;
+            modChanges.q.pointOffset = 0;
+            processData.inputParameterChanges = &modChanges;
+            processData.numSamples = 0;
+            processor->process(processData);
+            processData.inputParameterChanges = nullptr;
+
+            // Restore original state
+            saveStream.cursor = 0;
+            res = comp->setState(&saveStream);
+            if (res != Steinberg::kResultOk)
+            {
+                std::cerr << "ERROR: comp->setState() failed on valid state stream\n";
+                ++failures;
+            }
+            else
+            {
+                TestMemStream verifyStream;
+                comp->getState(&verifyStream);
+                if (verifyStream.buffer == saveStream.buffer)
+                {
+                    std::cout << "SUCCESS: VST3 processor state round-trip preserved all 7 parameters identically.\n";
+                }
+                else
+                {
+                    std::cerr << "ERROR: VST3 processor state round-trip stream mismatch after restore.\n";
+                    ++failures;
+                }
+            }
+        }
+
+        // Test legacy v1 state migration
+        {
+            TestMemStream v1Stream;
+            Steinberg::int32 v1 = 1;
+            double dNorm = 0.25;
+            double rNorm = 0.75;
+            v1Stream.writeVal(v1);
+            v1Stream.writeVal(dNorm);
+            v1Stream.writeVal(rNorm);
+            v1Stream.cursor = 0;
+
+            res = comp->setState(&v1Stream);
+            if (res != Steinberg::kResultOk)
+            {
+                std::cerr << "ERROR: comp->setState() failed on legacy v1 state\n";
+                ++failures;
+            }
+            else
+            {
+                TestMemStream migratedStream;
+                comp->getState(&migratedStream);
+                migratedStream.cursor = 0;
+                Steinberg::int32 ver = 0;
+                double md = 0, mr = 0, me = 0, ms = 0, mp = 0, mt = 0, mes = 0;
+                migratedStream.readVal(ver);
+                migratedStream.readVal(md);
+                migratedStream.readVal(mr);
+                migratedStream.readVal(me);
+                migratedStream.readVal(ms);
+                migratedStream.readVal(mp);
+                migratedStream.readVal(mt);
+                migratedStream.readVal(mes);
+
+                if (ver == 4 && std::fabs(md - 0.25) < 1e-6 && std::fabs(mr - 0.75) < 1e-6 &&
+                    std::fabs(me - 0.5) < 1e-6 && std::fabs(ms - 0.15) < 1e-6 &&
+                    std::fabs(mp - 0.0) < 1e-6 && std::fabs(mt - 0.5) < 1e-6 && std::fabs(mes - 0.5) < 1e-6)
+                {
+                    std::cout << "SUCCESS: VST3 legacy v1 state migration loaded correctly and reset unrepresented parameters to factory defaults.\n";
+                }
+                else
+                {
+                    std::cerr << "ERROR: VST3 legacy v1 state migration values mismatch!\n";
+                    ++failures;
+                }
+            }
         }
     }
 

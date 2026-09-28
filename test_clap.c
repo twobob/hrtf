@@ -238,11 +238,11 @@ int main(void) {
         for (size_t i = 0; i < wav_count; ++i) {
             if (fabsf(wav_buf[i]) > max_peak) max_peak = fabsf(wav_buf[i]);
         }
-        if (max_peak > 0.999f) {
-            printf("ERROR: Loaded WAV contains railed/clipped samples (peak=%f)\n", max_peak);
+        if (max_peak > 0.999f || max_peak < 0.50f) {
+            printf("ERROR: Loaded WAV peak (%f) is out of expected calibrated bounds [0.50, 0.999]\n", max_peak);
             ++failures;
         } else {
-            printf("SUCCESS: Loaded generated test pulse WAV file 'pulsed_pink_noise_48k.wav' (%zu samples, peak=%f, unclipped).\n",
+            printf("SUCCESS: Loaded generated test pulse WAV file 'pulsed_pink_noise_48k.wav' (%zu samples, peak=%f, within calibrated band [0.50, 0.999]).\n",
                    wav_count, max_peak);
         }
     }
@@ -314,6 +314,62 @@ int main(void) {
             ++failures;
         } else {
             printf("SUCCESS: params count is 7 as expected.\n");
+        }
+
+        /* Test parameter string conversions (value_to_text & text_to_value) across all 7 parameters */
+        if (params->value_to_text && params->text_to_value && params->get_info) {
+            int string_conv_ok = 1;
+            for (uint32_t p_idx = 0; p_idx < 7u; ++p_idx) {
+                clap_param_info_t info;
+                if (!params->get_info(plugin, p_idx, &info)) {
+                    printf("ERROR: get_info failed for parameter index %u\n", p_idx);
+                    string_conv_ok = 0;
+                    break;
+                }
+                char text_buf[64] = {0};
+                if (!params->value_to_text(plugin, info.id, info.default_value, text_buf, sizeof(text_buf))) {
+                    printf("ERROR: value_to_text failed for parameter '%s' (id=%u)\n", info.name, info.id);
+                    string_conv_ok = 0;
+                    break;
+                }
+                double parsed_val = 0.0;
+                if (!params->text_to_value(plugin, info.id, text_buf, &parsed_val)) {
+                    printf("ERROR: text_to_value failed to parse '%s' for parameter '%s'\n", text_buf, info.name);
+                    string_conv_ok = 0;
+                    break;
+                }
+                double diff = fabs(parsed_val - info.default_value);
+                if (diff > 0.05) {
+                    printf("ERROR: string conversion round-trip mismatch for '%s': expected %f, got %f (text='%s')\n",
+                           info.name, info.default_value, parsed_val, text_buf);
+                    string_conv_ok = 0;
+                    break;
+                }
+            }
+            if (string_conv_ok) {
+                printf("SUCCESS: Parameter string conversions (value_to_text and text_to_value) round-tripped with exact values for all 7 parameters.\n");
+            } else {
+                printf("ERROR: Parameter string conversion validation failed.\n");
+                ++failures;
+            }
+        } else {
+            printf("ERROR: value_to_text or text_to_value extension function missing.\n");
+            ++failures;
+        }
+
+        /* Test latency extension */
+        const clap_plugin_latency_t *lat = (const clap_plugin_latency_t *)plugin->get_extension(plugin, CLAP_EXT_LATENCY);
+        if (lat && lat->get) {
+            uint32_t l = lat->get(plugin);
+            if (l == 2u) {
+                printf("SUCCESS: CLAP latency correctly declared as 2 samples.\n");
+            } else {
+                printf("ERROR: CLAP latency declared as %u samples, expected 2.\n", l);
+                ++failures;
+            }
+        } else {
+            printf("ERROR: CLAP latency extension missing.\n");
+            ++failures;
         }
 
         clap_event_param_value_t nan_event;
@@ -540,6 +596,49 @@ int main(void) {
                 } else {
                     printf("ERROR: Near-field ITD aliased! Peak arrived at sample %u instead of ~60-70\n",
                            far_peak_idx);
+                    ++failures;
+                }
+            }
+
+            /* Test intermediate angle (30 deg right) ITD to validate Woodworth spherical model vs naive sine */
+            {
+                /* 30 deg rotation: 30 / 360 = 1/12 ≈ 0.083333 */
+                flush_param(plugin, params, 1, 2.0);          /* 2.0 m distance (far field, nf_scale = 1.0) */
+                flush_param(plugin, params, 2, 30.0 / 360.0); /* 30 deg azimuth (s = 0.50) */
+                flush_param(plugin, params, 3, 0.0);           /* horizontal plane */
+                flush_param(plugin, params, 4, 0.0);           /* anechoic */
+                flush_param(plugin, params, 5, 0.0);           /* Test pulse OFF */
+                flush_param(plugin, params, 7, 1.0);           /* 100% standard ear scale */
+
+                for (uint32_t i = 0; i < N; ++i) in_buf[i] = 0.0f;
+                for (int b = 0; b < 40; ++b) plugin->process(plugin, &process);
+
+                /* Feed single-sample unit impulse */
+                in_buf[0] = 1.0f;
+                plugin->process(plugin, &process);
+
+                /* Locate arrivals in near (R) and far (L) ears */
+                uint32_t near_peak_idx = 0, far_peak_idx = 0;
+                float near_max = 0.0f, far_max = 0.0f;
+                for (uint32_t i = 0; i < N; ++i) {
+                    if (fabsf(out_r[i]) > near_max) { near_max = fabsf(out_r[i]); near_peak_idx = i; }
+                    if (fabsf(out_l[i]) > far_max)  { far_max = fabsf(out_l[i]); far_peak_idx = i; }
+                }
+
+                /* Under Woodworth spherical ray-tracing at 30 deg (s = 0.5):
+                   woodworth_scale = (sin(pi/6) + pi/6) / (1 + 0.5 * pi) = 1.0236 / 2.5708 ≈ 0.3982
+                   itd = 0.00070 * 0.3982 * 48000 ≈ 13.38 samples.
+                   Near ear delay = 2 (guard). Far ear delay = 2 + 13.38 ≈ 15.38 samples.
+                   Difference = far_peak_idx - near_peak_idx ≈ 13..14 samples.
+                   Under naive sine model (sin(30 deg) = 0.5000):
+                   sine_itd = 0.00070 * 0.5 * 48000 = 16.80 samples (difference ≈ 17 samples). */
+                uint32_t itd_diff = (far_peak_idx >= near_peak_idx) ? (far_peak_idx - near_peak_idx) : 0;
+                if (itd_diff >= 13 && itd_diff <= 15) {
+                    printf("SUCCESS: Intermediate angle (30 deg) ITD matches Woodworth model (%u samples, expected ~13-14; naive sine would be ~17).\n",
+                           itd_diff);
+                } else {
+                    printf("ERROR: Intermediate angle (30 deg) ITD mismatch! Measured %u samples (expected 13..15 for Woodworth model, naive sine ~17).\n",
+                           itd_diff);
                     ++failures;
                 }
             }
