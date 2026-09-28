@@ -204,6 +204,8 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 
 ### VST3 Test Suite (`test_vst3.cpp`)
 - **Factory & Controller**: Validates COM class creation, parameter registration ($7$ parameters), and normalisation curves.
+- **Latency Reporting**: Verifies processor declares $2$ samples of latency (`getLatencySamples() == 2`) for PDC.
+- **State Serialisation & Migration**: Verifies `getState()` and `setState()` full round-trip across all 7 parameters and legacy v1 state migration.
 - **Binaural Energy & ILD**: Verifies that lateral panning ($90^\circ$) produces over $1.5\times$ more energy in the ipsilateral ear than the contralateral ear.
 - **Sample-Accurate Automation**: Verifies that parameter change events are applied at their exact sample offsets within the block.
 - **Oversize Block Handling**: Confirms that blocks larger than `maxSamplesPerBlock` ($1024+$ samples) process correctly and produce valid audio.
@@ -215,9 +217,11 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 
 ### CLAP Test Suite (`test_clap.c`)
 - **Lifecycle & Activation**: Tests `init()`, `activate()`, and `deactivate()`.
-- **Parameter Validation & Enumeration**: Tests parameter enumeration ($7$ parameters) and string conversions.
+- **Latency Extension**: Verifies plugin declares $2$ samples of latency via `CLAP_EXT_LATENCY`.
+- **Parameter Validation & Enumeration**: Tests parameter enumeration ($7$ parameters) and string conversions (validates exact `value_to_text` and `text_to_value` round-trip across all parameters).
 - **State Serialisation Round-Trip**: Verifies that saving state to a stream and restoring it accurately preserves all 7 parameter values across sessions.
 - **Legacy State Migration**: Validates that legacy v1 state archives load cleanly and reset new parameters to factory defaults.
+- **Woodworth Spherical Ray-Tracing ITD**: Asserts that intermediate lateral angle ($30^\circ$) arrival delay matches Woodworth spherical ray-tracing ($13\text{--}15$ samples, expected $\approx 13.4$) distinguishing from naive sine law ($16.8$ samples).
 - **Un-Aliased Near-Field ITD**: Asserts that extreme near-field delay ($5\text{ cm}$, $130\%$ ear scale) arrives at sample $60\text{--}70$ without circular buffer wrapping.
 - **Deterministic Spectral Differentiation**: Dogfoods internal test pulse to verify that crisp transient clicks exhibit $> 2\times$ the spectral first-difference energy of low rumble pulses.
 - **Zero-Input Pulse Synthesis & Silence**: Asserts that `Test Pulse` on silent input produces audible sound, and turning it off restores absolute silence ($< 10^{-12}$).
@@ -251,7 +255,7 @@ This batch script performs 5 sequential stages:
 2. **Build VST3 Plugin**: Compiles `RotatingHRTF_v2.vst3` and creates the standard bundle directory structure for Ableton Live.
 3. **Generate Test Audio**: Compiles and runs `tools\generate_test_pulse.c` to synthesise reference audio into `pulsed_pink_noise_48k.wav` and `test_signals/`.
 4. **Run Automated Test Suites**: Compiles and runs `test_clap.exe` (CLAP test harness) and `test_vst3.exe` (VST3 host validation).
-5. **System Deployment**: Copies the VST3 bundle to `C:\Program Files\Common Files\VST3\`.
+5. **System Deployment**: Copies the VST3 bundle directory (`bundle\RotatingHRTF_v2.vst3`) to `C:\Program Files\Common Files\VST3\` (requires administrator write privileges, or use `install_ableton.bat`).
 
 ---
 

@@ -129,14 +129,14 @@ echo ========================================================
 echo 5. Deploying to the system VST3 folder...
 echo ========================================================
 
-set TARGET_VST3_DIR=C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3\Contents\x86_64-win
-if not exist "%TARGET_VST3_DIR%" mkdir "%TARGET_VST3_DIR%" 2>nul
-copy /y RotatingHRTF_v2.vst3 "%TARGET_VST3_DIR%\RotatingHRTF_v2.vst3" >nul
+set TARGET_VST3_ROOT=C:\Program Files\Common Files\VST3\RotatingHRTF_v2.vst3
+if not exist "%TARGET_VST3_ROOT%" mkdir "%TARGET_VST3_ROOT%" 2>nul
+xcopy /s /e /y /i "bundle\RotatingHRTF_v2.vst3" "%TARGET_VST3_ROOT%" >nul 2>&1
 if !errorlevel! neq 0 (
-    echo NOTICE: System VST3 deployment skipped - insufficient write permissions.
+    echo NOTICE: System VST3 bundle deployment skipped - insufficient write permissions.
     echo         Run install_ableton.bat as Administrator to install into Ableton Live.
 ) else (
-    echo Deployed to: %TARGET_VST3_DIR%\RotatingHRTF_v2.vst3
+    echo Deployed VST3 bundle to: %TARGET_VST3_ROOT%
 )
 
 echo.
