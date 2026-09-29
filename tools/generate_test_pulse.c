@@ -61,6 +61,19 @@ static int write_wav_file(const char *filename, const float *samples, size_t num
         }
     }
 
+    /* Check for peak amplitude: the calibrated test pulse generator must never
+       overdrive or clip. If raw peak exceeds 0.999, fail immediately so gain
+       regressions cannot be masked by silent normalisation. */
+    double peak = 0.0;
+    for (size_t i = 0; i < num_samples; ++i) {
+        double a = fabs((double)samples[i]);
+        if (a > peak) peak = a;
+    }
+    if (peak > 0.999) {
+        fprintf(stderr, "ERROR: Raw generated signal peak (%.6f) exceeds 0 dBFS! Failing clipping guard.\n", peak);
+        return 0;
+    }
+
     FILE *f = fopen(filename, "wb");
     if (!f) {
         fprintf(stderr, "ERROR: Unable to open file for writing: %s\n", filename);
@@ -91,20 +104,6 @@ static int write_wav_file(const char *filename, const float *samples, size_t num
         return 0;
     }
 
-    /* Check for peak amplitude: the calibrated test pulse generator must never
-       overdrive or clip. If raw peak exceeds 0.999, fail immediately so gain
-       regressions cannot be masked by silent normalisation. */
-    double peak = 0.0;
-    for (size_t i = 0; i < num_samples; ++i) {
-        double a = fabs((double)samples[i]);
-        if (a > peak) peak = a;
-    }
-    if (peak > 0.999) {
-        fprintf(stderr, "ERROR: Raw generated signal peak (%.6f) exceeds 0 dBFS! Failing clipping guard.\n", peak);
-        fclose(f);
-        return 0;
-    }
-
     const double scale = 8388607.0; /* 2^23 - 1 */
 
     for (size_t i = 0; i < num_samples; ++i) {
@@ -128,7 +127,10 @@ static int write_wav_file(const char *filename, const float *samples, size_t num
         }
     }
 
-    fclose(f);
+    if (fclose(f) != 0) {
+        fprintf(stderr, "ERROR: Failed to flush WAV data to: %s\n", filename);
+        return 0;
+    }
     printf("Successfully wrote: %s (%zu samples, %.2f s, 24-bit @ %u Hz, peak=%.6f)\n",
            filename, num_samples, (double)num_samples / fs, fs, peak);
     return 1;
