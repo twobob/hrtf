@@ -1,6 +1,9 @@
 @echo off
 setlocal enabledelayedexpansion
 
+:: Run from the repository root whatever the caller's current directory.
+cd /d "%~dp0"
+
 :: ---------------------------------------------------------------
 :: Fail fast if the vendored SDK submodules are not checked out.
 :: ---------------------------------------------------------------
@@ -9,7 +12,26 @@ if not exist "base\source\baseiids.cpp"               goto missing_submodules
 if not exist "pluginterfaces\base\funknown.cpp"       goto missing_submodules
 if not exist "clap-src\include\clap\clap.h"           goto missing_submodules
 
-call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+:: ---------------------------------------------------------------
+:: Locate MSVC with vswhere so any edition (Community, Professional,
+:: Enterprise, Build Tools) works, falling back to the VS 2022 Community
+:: default. "call" keeps cmd from mangling the quoted "(x86)" path.
+:: ---------------------------------------------------------------
+set "VCVARS="
+set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
+if exist "%VSWHERE%" (
+    for /f "usebackq delims=" %%i in (`call "%VSWHERE%" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do (
+        if exist "%%i\VC\Auxiliary\Build\vcvars64.bat" set "VCVARS=%%i\VC\Auxiliary\Build\vcvars64.bat"
+    )
+)
+if not defined VCVARS set "VCVARS=C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+if not exist "!VCVARS!" (
+    echo ERROR: could not find vcvars64.bat. Install Visual Studio 2022 or later
+    echo        with the "Desktop development with C++" workload.
+    exit /b 1
+)
+echo Using !VCVARS!
+call "!VCVARS!"
 if !errorlevel! neq 0 exit /b 1
 
 if not exist "build" mkdir "build"
@@ -65,7 +87,9 @@ set VST3_SOURCES=^
     base\source\updatehandler.cpp ^
     base\thread\source\flock.cpp
 
-cl.exe /nologo /W4 /WX /LD /O2 /std:c++17 /EHsc /MD /external:I . /external:W0 /Ivst3 /DRELEASE=1 /D_CRT_SECURE_NO_WARNINGS ^
+:: /MT links the C runtime statically, so the plugin loads on machines
+:: without the Visual C++ redistributable (the CLAP build already does).
+cl.exe /nologo /W4 /WX /LD /O2 /std:c++17 /EHsc /MT /external:I . /external:W0 /Ivst3 /DRELEASE=1 /D_CRT_SECURE_NO_WARNINGS ^
     %VST3_SOURCES% ^
     /Fo:build\ ^
     /Fe:RotatingHRTF_v2.vst3 /link /SUBSYSTEM:WINDOWS user32.lib shell32.lib ole32.lib
@@ -107,7 +131,7 @@ if !errorlevel! neq 0 (
     echo ERROR: Failed to build test_clap.exe!
     exit /b 1
 )
-test_clap.exe
+.\test_clap.exe
 if !errorlevel! neq 0 (
     echo ERROR: test_clap.exe reported failures!
     exit /b 1
@@ -118,7 +142,7 @@ if !errorlevel! neq 0 (
     echo ERROR: Failed to build test_vst3.exe!
     exit /b 1
 )
-test_vst3.exe
+.\test_vst3.exe
 if !errorlevel! neq 0 (
     echo ERROR: test_vst3.exe reported failures!
     exit /b 1

@@ -19,6 +19,7 @@
 *.vst3
 /pulsed_pink_noise_48k.wav
 test_signals/*.wav
+!test_signals/pulsed_pink_noise_48k.wav
 
 # ---------------------------------------------------------------
 # Editor / OS cruft
