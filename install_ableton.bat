@@ -5,7 +5,7 @@ setlocal
 :: Installs the built VST3 bundle so DAWs (Ableton Live, etc.) find it.
 ::
 ::   Usage:  install_ableton.bat [vst3-root]
-;;
+::
 :: The default root is "C:\Program Files\Common Files\VST3", which needs
 :: Administrator rights, so the script re-launches itself elevated.
 :: Pass a different root (e.g. a user folder) to install without UAC.
@@ -46,13 +46,18 @@ if not exist "%SOURCE%" (
 
 mkdir "%TARGET_DIR%" 2>nul
 if not exist "%TARGET_DIR%" (
-    :: Never re-elevate from the elevated instance, or a target that cannot
-    :: be created would bounce UAC prompts forever.
+    rem Never re-elevate from the elevated instance, or a target that cannot
+    rem be created would bounce UAC prompts forever.
     if defined QUIET goto fail
     echo Administrator rights are required to write to "%VST3_ROOT%".
     echo Elevating - accept the UAC prompt in the window that opens.
-    powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs -ArgumentList '%VST3_ROOT%','quiet' -Wait"
-    :: The elevated instance performs the copy; verify it really happened.
+    rem Hand the paths over through the environment and quote the root
+    rem explicitly: Start-Process joins -ArgumentList items with bare spaces,
+    rem which would split "C:\Program Files\..." into several arguments.
+    set "HRTF_INSTALL_SELF=%~f0"
+    set "HRTF_INSTALL_ROOT=%VST3_ROOT%"
+    powershell -NoProfile -Command "Start-Process -FilePath $env:HRTF_INSTALL_SELF -Verb RunAs -ArgumentList ('\"{0}\" quiet' -f $env:HRTF_INSTALL_ROOT) -Wait"
+    rem The elevated instance performs the copy; verify it really happened.
     if not exist "%TARGET%" goto fail
     goto installed
 )
