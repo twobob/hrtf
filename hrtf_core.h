@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <math.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -11,7 +12,27 @@ extern "C" {
 
 typedef struct HrtfCore HrtfCore;
 
-#define HRTF_STATE_VERSION 4
+#define HRTF_STATE_VERSION 5
+
+/* Distance control taper. The Distance parameter is exposed to hosts as a
+   0..1 position mapped logarithmically onto 0.05..20 m, so every doubling of
+   distance takes the same knob travel (5 cm to 1 m is half of it). */
+#define HRTF_DISTANCE_MIN_M 0.05
+#define HRTF_DISTANCE_MAX_M 20.0
+
+static inline double hrtf_distance_from_position(double pos)
+{
+    if (!(pos > 0.0)) pos = 0.0; /* also maps NaN to the minimum */
+    if (pos > 1.0) pos = 1.0;
+    return HRTF_DISTANCE_MIN_M * pow(HRTF_DISTANCE_MAX_M / HRTF_DISTANCE_MIN_M, pos);
+}
+
+static inline double hrtf_position_from_distance(double metres)
+{
+    if (!(metres > HRTF_DISTANCE_MIN_M)) return 0.0;
+    if (metres >= HRTF_DISTANCE_MAX_M) return 1.0;
+    return log(metres / HRTF_DISTANCE_MIN_M) / log(HRTF_DISTANCE_MAX_M / HRTF_DISTANCE_MIN_M);
+}
 
 /* distance_m: metres, clamped to 0.05..20.
    rotation_phase: 0..1, periodic; 0=front, .25=right, .5=back, .75=left.
@@ -25,6 +46,13 @@ void hrtf_set_rotation_phase(HrtfCore *h, double phase);
 void hrtf_set_elevation_deg(HrtfCore *h, double elevation_deg);
 void hrtf_set_space(HrtfCore *h, double space_01);
 void hrtf_set_ear_scale(HrtfCore *h, double scale);
+/* Room reflections on (non-zero) or bypassed (0); fades over ~20 ms and
+   leaves the Space amount untouched. */
+void hrtf_set_reflections(HrtfCore *h, int enabled);
+/* Output level: pink noise at the default position (2 m, front, 15% Space)
+   comes out 2 dB below the input; beyond 2 m it falls by inverse distance,
+   and closer in it rises gently but never above the input level in either
+   ear, in any direction or setting. */
 void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n);
 
 /* Test generator signal modes */
@@ -46,6 +74,8 @@ typedef struct HrtfTestGen {
     double freq_hz;         /* Sine test tone frequency */
     double pulse_dur_s;     /* Pulse duration in seconds */
     double sine_phase;
+    float env;              /* Slew-limited pulse envelope */
+    double mix;             /* hrtf_test_gen_render crossfade: 0 = input, 1 = generator */
 } HrtfTestGen;
 
 /* Initialise the test generator state */
@@ -59,6 +89,12 @@ void hrtf_test_gen_set_duration(HrtfTestGen *gen, double dur_s);
 
 /* Synthesise pulses aligned to beats */
 void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double bpm, double beat_pos, int is_playing);
+
+/* Plugin-side source switch: writes the input (enabled == 0) or the test
+   pulses (enabled != 0) to out, crossfading over 5 ms whenever `enabled`
+   changes. `in` may be NULL (silence) or alias `out`. */
+void hrtf_test_gen_render(HrtfTestGen *gen, const float *in, float *out, size_t n,
+                          double bpm, double beat_pos, int is_playing, int enabled);
 
 #ifdef __cplusplus
 }

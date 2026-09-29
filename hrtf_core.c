@@ -12,6 +12,31 @@
 #define HRTF_PI 3.141592653589793238462643383279502884
 #define HRTF_MAX_ITD_S 0.00070
 
+/* Output level calibration (see distance_gains()).
+   HRTF_MASTER_GAIN puts pink noise at the default position (2 m, front,
+   15% Space) 2 dB below the input. HRTF_LEVEL_RISE_DB is how far the level
+   may rise above that as the source comes closer than 2 m: the largest rise
+   that keeps every ear, in every direction, at every Space and Ear Scale
+   setting, below the input level for pink noise (with a 0.35 dB margin).
+   HRTF_ROOM_ENERGY is the room path's pink-noise energy per unit send,
+   relative to the direct path, used to keep Space loudness-neutral. All
+   three were measured with long pink noise over the parameter grid;
+   test_clap.c re-checks the guarantee. */
+#ifndef HRTF_MASTER_GAIN
+#define HRTF_MASTER_GAIN 0.66837   /* -3.500 dB */
+#endif
+#ifndef HRTF_LEVEL_RISE_DB
+#define HRTF_LEVEL_RISE_DB 0.45    /* binding case: 5 cm, 45 deg, 130% ear, 100% Space */
+#endif
+
+#ifndef HRTF_ROOM_ENERGY
+#define HRTF_ROOM_ENERGY 0.293
+#endif
+
+static const double k_master_gain = HRTF_MASTER_GAIN;
+static const double k_level_rise_db = HRTF_LEVEL_RISE_DB;
+static const double k_room_energy = HRTF_ROOM_ENERGY;
+
 typedef struct {
     double b0,b1,b2,a1,a2;
     double z1,z2;
@@ -29,6 +54,13 @@ struct HrtfCore {
     double space_smooth;
     double ear_scale;
     double ear_scale_smooth;
+    double reflections;        /* 1 = room reflections on, 0 = bypassed */
+    double reflections_smooth;
+
+    /* distance_gains() result for cached_distance */
+    double cached_distance;
+    double cached_direct_gain;
+    double cached_room_gain;
 
     float *delay_l;
     float *delay_r;
@@ -40,6 +72,10 @@ struct HrtfCore {
     size_t early_pos;
     double early_lpf_l;
     double early_lpf_r;
+
+    /* Samples since the last coefficient redesign. Kept across calls so the
+       render does not depend on how the host splits audio into blocks. */
+    unsigned int ctrl_count;
 
     Biquad l[5];
     Biquad r[5];
@@ -120,6 +156,15 @@ static void biquad_lowshelf(Biquad *q, double fs, double f0, double gain_db)
     q->a1 = a1/a0; q->a2 = a2/a0;
 }
 
+/* Clamp a design frequency into [lo, hi] and then below max_f. Applying the
+   Nyquist guard last keeps it authoritative even when max_f < lo, which
+   happens at very low sample rates. */
+static double clamp_freq(double f, double lo, double hi, double max_f)
+{
+    f = clampd(f, lo, hi);
+    return f > max_f ? max_f : f;
+}
+
 static double biquad_process(Biquad *q, double x)
 {
     /* Transposed direct form II. */
@@ -168,6 +213,55 @@ static double interp_delay(const float *buf, size_t size, double write_pos, doub
     return ((c3 * f + c2) * f + c1) * f + c0;
 }
 
+/* Linearly interpolated read `delay` samples behind write_pos. Callers pass
+   delay >= 1, so both taps are already written. Fractional taps let the
+   reflection delays move continuously instead of jumping a whole sample. */
+static double early_tap(const float *buf, size_t size, size_t write_pos, double delay)
+{
+    double p = (double)write_pos - delay;
+    while (p < 0.0) p += (double)size;
+    const size_t i0 = (size_t)p;
+    const size_t i1 = (i0 + 1) % size;
+    const double f = p - (double)i0;
+    return (double)buf[i0 % size] + f * ((double)buf[i1] - (double)buf[i0 % size]);
+}
+
+/* Direct-path and room gains for a source at distance d (metres).
+
+   The physical model gives the direct sound a 1/d law above 1 m and a
+   gentle proximity term below it, while the room reflections decay only
+   mildly with distance; their ratio (the direct-to-reverberant ratio) is the
+   main distance cue and is preserved exactly here.
+
+   The overall level is then re-shaped to follow a loudness curve anchored
+   at 2 m: inverse distance beyond 2 m, and closer in a rise that eases into
+   a ceiling HRTF_LEVEL_RISE_DB above the 2 m level (the tanh keeps the
+   slope continuous at 2 m). Because the whole mix is re-scaled, the room
+   gets quieter relative to the direct sound as the source approaches,
+   exactly as the DRR demands, without the output ever getting louder than
+   the input. */
+static void distance_gains(double d, double *direct, double *room)
+{
+    const double dist = clampd(d, 0.05, 20.0);
+    const double phys_direct = (dist >= 1.0) ? 1.0 / dist
+                                             : 1.0 + (1.0 - dist) * 0.4142;
+    const double phys_room = 1.0 / sqrt(1.0 + 0.15 * dist);
+
+    double level;
+    if (dist >= 2.0) {
+        level = 2.0 / dist;
+    } else if (k_level_rise_db > 1e-9) {
+        const double halvings = log2(2.0 / dist);
+        const double rise_db = k_level_rise_db * tanh(6.0206 * halvings / k_level_rise_db);
+        level = pow(10.0, rise_db / 20.0);
+    } else {
+        level = 1.0;
+    }
+
+    *direct = k_master_gain * level;
+    *room = k_master_gain * level * phys_room / phys_direct;
+}
+
 static void design_filters(HrtfCore *h, double phase, double elevation_deg, double distance,
                            double ear_scale, Biquad *l, Biquad *r)
 {
@@ -204,13 +298,14 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     const double scale = clampd(ear_scale, 0.70, 1.30);
     const double inv_scale = 1.0 / scale;
 
-    /* Protect against filter instability at low sample rates (e.g. 32 kHz) by clamping below Nyquist */
+    /* Protect against filter instability at low sample rates by keeping every
+       design frequency below Nyquist. */
     const double max_f = 0.48 * h->fs;
 
     /* Dynamic elevation concha notch:
-       Median plane notch shifts from ~4.5 kHz (below) up to ~9.5 kHz (overhead),
+       Median plane notch shifts from ~3.5 kHz (below) up to ~9.5 kHz (overhead),
        scaled by anthropometric ear dimensions. */
-    const double f_notch = clampd((6500.0 + 3000.0 * v) * inv_scale, 3000.0, clampd(15000.0, 3000.0, max_f));
+    const double f_notch = clamp_freq((6500.0 + 3000.0 * v) * inv_scale, 3000.0, 15000.0, max_f);
     const double notch = -4.0 * rear - 3.5 * clampd(-v, 0.0, 1.0);
 
     /* High-frequency air falls towards rear, and undergoes cranial shadow from overhead. */
@@ -222,10 +317,10 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
     const double left_far  = clampd(s, 0.0, 1.0);
     const double right_far = clampd(-s, 0.0, 1.0);
 
-    const double f_presence = clampd(3900.0 * inv_scale, 1500.0, clampd(7500.0, 1500.0, max_f));
-    const double f_air = clampd(8500.0 * inv_scale, 4000.0, clampd(18000.0, 4000.0, max_f));
-    const double f_side = clampd(2200.0 * inv_scale, 1000.0, clampd(4500.0, 1000.0, max_f));
-    const double f_nf = clampd(350.0 * inv_scale, 150.0, clampd(800.0, 150.0, max_f));
+    const double f_presence = clamp_freq(3900.0 * inv_scale, 1500.0, 7500.0, max_f);
+    const double f_air = clamp_freq(8500.0 * inv_scale, 4000.0, 18000.0, max_f);
+    const double f_side = clamp_freq(2200.0 * inv_scale, 1000.0, 4500.0, max_f);
+    const double f_nf = clamp_freq(350.0 * inv_scale, 150.0, 800.0, max_f);
 
     biquad_peaking(&l[0], h->fs, f_presence, 0.85, presence);
     biquad_peaking(&r[0], h->fs, f_presence, 0.85, presence);
@@ -242,7 +337,9 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
 
     /* Near-field low-frequency ILD divergence (Distance Variation Function / DVF).
        In the near field (d < 1.0 m), spherical wavefront curvature produces significant
-       low-frequency ILD (up to +10 dB boost on near ear, and cut on far ear). */
+       low-frequency ILD (up to 9.5 dB). The whole difference is applied as a cut
+       on the far ear: the interaural cue is the same, but the near ear is never
+       pushed above the calibrated output level (see distance_gains()). */
     double nf_gain_l = 0.0;
     double nf_gain_r = 0.0;
     if (distance < 1.0) {
@@ -250,11 +347,9 @@ static void design_filters(HrtfCore *h, double phase, double elevation_deg, doub
         const double prox = (1.0 - d_norm); /* 0 at 1m, 0.95 at 0.05m */
         const double nf_ild = 10.0 * prox * fabs(s); /* up to 9.5 dB difference */
         if (s > 0.0) {
-            nf_gain_r = +0.5 * nf_ild;
-            nf_gain_l = -0.5 * nf_ild;
+            nf_gain_l = -nf_ild;
         } else if (s < 0.0) {
-            nf_gain_l = +0.5 * nf_ild;
-            nf_gain_r = -0.5 * nf_ild;
+            nf_gain_r = -nf_ild;
         }
     }
     biquad_lowshelf(&l[4], h->fs, f_nf, nf_gain_l);
@@ -274,6 +369,8 @@ HrtfCore *hrtf_create(double sample_rate)
     h->elevation_deg = h->elevation_smooth = 0.0;
     h->space = h->space_smooth = 0.15; /* 15% default room externalisation */
     h->ear_scale = h->ear_scale_smooth = 1.0; /* 100% standard anthropometric scale */
+    h->reflections = h->reflections_smooth = 1.0;
+    h->cached_distance = -1.0;
 
     /* Ensure delay line is sized to accommodate maximum near-field ITD (~1.46 ms)
        with margin at any sample rate up to 192 kHz and beyond. */
@@ -319,6 +416,7 @@ void hrtf_reset(HrtfCore *h)
     h->early_pos = 0;
     h->early_lpf_l = 0.0;
     h->early_lpf_r = 0.0;
+    h->ctrl_count = 0;
 
     for (size_t i=0; i<5; ++i) {
         biquad_reset(&h->l[i]);
@@ -330,6 +428,7 @@ void hrtf_reset(HrtfCore *h)
     h->elevation_smooth = clampd(h->elevation_deg, -90.0, 90.0);
     h->space_smooth = clampd(h->space, 0.0, 1.0);
     h->ear_scale_smooth = clampd(h->ear_scale, 0.70, 1.30);
+    h->reflections_smooth = h->reflections;
 }
 
 void hrtf_set_distance(HrtfCore *h, double distance_m)
@@ -364,6 +463,12 @@ void hrtf_set_ear_scale(HrtfCore *h, double scale)
     h->ear_scale = clampd(scale, 0.70, 1.30);
 }
 
+void hrtf_set_reflections(HrtfCore *h, int enabled)
+{
+    if (!h) return;
+    h->reflections = enabled ? 1.0 : 0.0;
+}
+
 static inline float soft_limit(float x)
 {
     const float T = 0.89125f; /* -1.0 dBFS linear threshold */
@@ -391,12 +496,19 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
     if (!isfinite(h->elevation_smooth)) h->elevation_smooth = 0.0;
     if (!isfinite(h->space_smooth)) h->space_smooth = 0.15;
     if (!isfinite(h->ear_scale_smooth)) h->ear_scale_smooth = 1.0;
+    if (!isfinite(h->reflections_smooth)) h->reflections_smooth = h->reflections;
 
     const double param_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms */
     const double distance_slew = exp(-1.0 / (0.050 * h->fs)); /* 50 ms */
     const double elev_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms */
     const double space_slew = exp(-1.0 / (0.030 * h->fs)); /* 30 ms */
     const double ear_scale_slew = exp(-1.0 / (0.040 * h->fs)); /* 40 ms */
+    const double reflections_slew = exp(-1.0 / (0.020 * h->fs)); /* 20 ms fade */
+
+    /* 1-pole wall absorption low-pass. The pole is derived from a fixed
+       corner (~8 kHz, a pole of 0.35 at 48 kHz) so the room colour does not
+       change with the host sample rate. */
+    const double wall_pole = exp(-2.0 * HRTF_PI * 8020.1 / h->fs);
 
     for (size_t i=0; i<n; ++i) {
         double dp = h->phase - h->phase_smooth;
@@ -415,6 +527,9 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 
         h->ear_scale_smooth += (1.0-ear_scale_slew) *
                                (h->ear_scale - h->ear_scale_smooth);
+
+        h->reflections_smooth += (1.0-reflections_slew) *
+                                 (h->reflections - h->reflections_smooth);
 
         const double theta = h->phase_smooth * 2.0 * HRTF_PI;
         const double phi = h->elevation_smooth * (HRTF_PI / 180.0);
@@ -446,19 +561,15 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             gr /= norm;
         }
 
-        /* Distance attenuation referenced to 1 metre.
-           Above 1 metre: follows standard 1/d free-field inverse-distance law.
-           Below 1 metre: gentle proximity loudness gain (up to +3 dB at 5 cm)
-           providing an authentic near-field intimacy cue without runaway clipping. */
+        /* Distance level and direct-to-reverberant balance, recomputed only
+           when the smoothed distance actually moves. */
         const double d = h->distance_smooth;
-        double distance_gain;
-        if (d >= 1.0) {
-            distance_gain = 1.0 / d;
-        } else {
-            const double prox = 1.0 - clampd(d, 0.05, 1.0);
-            distance_gain = 1.0 + prox * 0.4142;
+        if (d != h->cached_distance) {
+            distance_gains(d, &h->cached_direct_gain, &h->cached_room_gain);
+            h->cached_distance = d;
         }
-        distance_gain = clampd(distance_gain, 0.05, 1.50);
+        const double direct_gain = h->cached_direct_gain;
+        const double room_gain = h->cached_room_gain;
 
         /* Near-field ITD correction: spherical wavefront curvature increases
            effective acoustic path length to far ear at distances < 1m.
@@ -471,7 +582,8 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         double abs_s = fabs(s);
         if (abs_s > 1.0) abs_s = 1.0;
         const double theta_lat = asin(abs_s);
-        const double woodworth_scale = (sin(theta_lat) + theta_lat) / (1.0 + 0.5 * HRTF_PI);
+        /* sin(theta_lat) == abs_s by construction. */
+        const double woodworth_scale = (abs_s + theta_lat) / (1.0 + 0.5 * HRTF_PI);
         const double signed_woodworth = (s >= 0.0) ? woodworth_scale : -woodworth_scale;
 
         const double itd_s = HRTF_MAX_ITD_S * signed_woodworth * nf_itd_scale * h->ear_scale_smooth;
@@ -480,7 +592,10 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
         if (itd_samples >= 0.0) dl = itd_samples;  /* source on right -> delay left ear */
         else dr = -itd_samples;                    /* source on left -> delay right ear */
 
-        const float x = mono[i];
+        /* A single NaN or infinity reaching the recursive filters would
+           latch them and silence the output for the rest of the session. */
+        float x = mono[i];
+        if (!isfinite(x)) x = 0.0f;
         h->delay_l[h->delay_pos] = x;
         h->delay_r[h->delay_pos] = x;
 
@@ -495,11 +610,14 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
 
         /* Re-design coefficients at a modest control rate. The parameter
            smoother runs at audio rate; 16-sample coefficient updates keep
-           zippering negligible while avoiding per-sample trig/coefficient work. */
-        if ((i & 15u) == 0u) {
+           zippering negligible while avoiding per-sample trig/coefficient work.
+           The counter persists across calls, so the update grid is the same
+           whatever block sizes the host uses. */
+        if (h->ctrl_count == 0u) {
             design_filters(h, h->phase_smooth, h->elevation_smooth, h->distance_smooth,
                            h->ear_scale_smooth, h->l, h->r);
         }
+        h->ctrl_count = (h->ctrl_count + 1u) & 15u;
 
         double yl = xl;
         double yr = xr;
@@ -514,84 +632,81 @@ void hrtf_process(HrtfCore *h, const float *mono, float **stereo, size_t n)
             h->early_buf[h->early_pos] = x;
             const size_t sz = h->early_size;
             const size_t pos = h->early_pos;
+            const double fs = h->fs;
 
-            /* Base boundary reflection delay times */
-            const size_t t_floor = (size_t)(0.0048 * h->fs);
-            const size_t t_ceil  = (size_t)(0.0081 * h->fs);
-            const size_t t_wall  = (size_t)(0.0140 * h->fs);
-            const size_t t_rear  = (size_t)(0.0234 * h->fs);
+            /* Base boundary reflection delay times, in samples */
+            const double t_floor = 0.0048 * fs;
+            const double t_ceil  = 0.0081 * fs;
+            const double t_wall  = 0.0140 * fs;
+            const double t_rear  = 0.0234 * fs;
 
             /* Interaural reflection delays:
                Reflections arriving from lateral boundaries exhibit ITD (~0.65 ms * ear_scale).
                This decorrelates the binaural reflection field while maintaining
-               exact Left-Right mathematical symmetry on the median plane (s = 0). */
-            const size_t wall_itd = (size_t)(0.00065 * h->fs * h->ear_scale_smooth);
-            const size_t lateral_itd = (size_t)(fabs(s) * 0.00040 * h->fs * h->ear_scale_smooth);
-
-            const size_t t1_l = (pos + sz - (t_floor + (s > 0.0 ? lateral_itd : 0))) % sz;
-            const size_t t1_r = (pos + sz - (t_floor + (s < 0.0 ? lateral_itd : 0))) % sz;
-
-            const size_t t2_l = (pos + sz - (t_ceil + (s > 0.0 ? lateral_itd : 0))) % sz;
-            const size_t t2_r = (pos + sz - (t_ceil + (s < 0.0 ? lateral_itd : 0))) % sz;
-
-            const size_t t3_l = (pos + sz - t_wall) % sz;
-            const size_t t3_r = (pos + sz - (t_wall + wall_itd)) % sz; /* Left wall reaches right ear later */
-
-            const size_t t4_l = (pos + sz - (t_wall + wall_itd)) % sz; /* Right wall reaches left ear later */
-            const size_t t4_r = (pos + sz - t_wall) % sz;
-
-            const size_t t5_l = (pos + sz - (t_rear + (s > 0.0 ? lateral_itd : 0))) % sz;
-            const size_t t5_r = (pos + sz - (t_rear + (s < 0.0 ? lateral_itd : 0))) % sz;
+               exact Left-Right mathematical symmetry on the median plane (s = 0).
+               The delays are fractional so they glide with rotation and ear
+               scale automation instead of stepping a whole sample at a time. */
+            const double wall_itd = 0.00065 * fs * h->ear_scale_smooth;
+            const double lateral_itd = fabs(s) * 0.00040 * fs * h->ear_scale_smooth;
+            const double lat_l = (s > 0.0) ? lateral_itd : 0.0;
+            const double lat_r = (s < 0.0) ? lateral_itd : 0.0;
 
             /* 3D Direction-dependent early reflections:
                Incident energy hitting boundary surfaces scales with source direction cosines:
                - Floor/ceiling modulated by vertical projection v
                - Left/right walls modulated by lateral projection s
                - Rear wall modulated by front/back projection c */
-            const float r1_l = h->early_buf[t1_l] * (float)(0.22 * (1.0 - 0.40 * v));
-            const float r1_r = h->early_buf[t1_r] * (float)(0.22 * (1.0 - 0.40 * v));
-            const float r2_l = h->early_buf[t2_l] * (float)(0.20 * (1.0 + 0.40 * v));
-            const float r2_r = h->early_buf[t2_r] * (float)(0.20 * (1.0 + 0.40 * v));
-            const float r3_l = h->early_buf[t3_l] * (float)(0.20 * (1.0 - 0.60 * s));
-            const float r3_r = h->early_buf[t3_r] * (float)(0.20 * (1.0 - 0.60 * s));
-            const float r4_l = h->early_buf[t4_l] * (float)(0.20 * (1.0 + 0.60 * s));
-            const float r4_r = h->early_buf[t4_r] * (float)(0.20 * (1.0 + 0.60 * s));
-            const float r5_l = h->early_buf[t5_l] * (float)(0.16 * (1.0 - 0.50 * c));
-            const float r5_r = h->early_buf[t5_r] * (float)(0.16 * (1.0 - 0.50 * c));
+            const double g_floor = 0.22 * (1.0 - 0.40 * v);
+            const double g_ceil  = 0.20 * (1.0 + 0.40 * v);
+            const double g_lwall = 0.20 * (1.0 - 0.60 * s);
+            const double g_rwall = 0.20 * (1.0 + 0.60 * s);
+            const double g_rear  = 0.16 * (1.0 - 0.50 * c);
+
+            const double r1_l = early_tap(h->early_buf, sz, pos, t_floor + lat_l) * g_floor;
+            const double r1_r = early_tap(h->early_buf, sz, pos, t_floor + lat_r) * g_floor;
+            const double r2_l = early_tap(h->early_buf, sz, pos, t_ceil + lat_l) * g_ceil;
+            const double r2_r = early_tap(h->early_buf, sz, pos, t_ceil + lat_r) * g_ceil;
+            /* Left wall reaches the right ear later; right wall reaches the left ear later. */
+            const double r3_l = early_tap(h->early_buf, sz, pos, t_wall) * g_lwall;
+            const double r3_r = early_tap(h->early_buf, sz, pos, t_wall + wall_itd) * g_lwall;
+            const double r4_l = early_tap(h->early_buf, sz, pos, t_wall + wall_itd) * g_rwall;
+            const double r4_r = early_tap(h->early_buf, sz, pos, t_wall) * g_rwall;
+            const double r5_l = early_tap(h->early_buf, sz, pos, t_rear + lat_l) * g_rear;
+            const double r5_r = early_tap(h->early_buf, sz, pos, t_rear + lat_r) * g_rear;
 
             /* Binaural distribution: lateral wall reflections exhibit acoustic ILD and ITD at ears.
-               Median plane (s = 0) remains mathematically symmetric. */
-            const double raw_l = r1_l + r2_l + r3_l + 0.25 * r4_l + r5_l;
-            const double raw_r = r1_r + r2_r + 0.25 * r3_r + r4_r + r5_r;
+               Each ear sums its near wall first and the far wall second, so on
+               the median plane (s = 0) both sums are bit-identical. */
+            const double raw_l = (r1_l + r2_l + r5_l) + (r3_l + 0.25 * r4_l);
+            const double raw_r = (r1_r + r2_r + r5_r) + (r4_r + 0.25 * r3_r);
 
             /* Gentle 1-pole wall absorption filter */
-            h->early_lpf_l = 0.65 * raw_l + 0.35 * h->early_lpf_l;
-            h->early_lpf_r = 0.65 * raw_r + 0.35 * h->early_lpf_r;
+            h->early_lpf_l = (1.0 - wall_pole) * raw_l + wall_pole * h->early_lpf_l;
+            h->early_lpf_r = (1.0 - wall_pole) * raw_r + wall_pole * h->early_lpf_r;
 
             h->early_pos++;
             if (h->early_pos >= h->early_size) h->early_pos = 0;
         }
 
-        /* Master headroom scale (0.24 = -12.4 dBFS):
-           Scales the combined direct sound and early reflection mix.
-           Even under worst-case proximity boost (d = 0.05m, +2.88 dB distance gain,
-           +7.4 dB near presence) combined with 100% room reflections, worst-case peak
-           amplitude remains strictly below the -1.0 dBFS soft-limiter threshold (0.89125)
-           on full-scale 0 dBFS inputs, ensuring the waveshaper remains transparently idle. */
-        const double master_headroom = 0.24;
-        const double space_gain = h->space_smooth * 0.70;
+        /* Room send: Space sets the amount, the Reflections switch fades the
+           whole room in or out without touching the Space setting, and
+           room_gain carries the distance-dependent direct-to-reverberant
+           ratio (see distance_gains()). */
+        const double space_gain = h->space_smooth * 0.70 * h->reflections_smooth;
 
-        /* Distance-dependent Direct-to-Reverberant Ratio (DRR):
-           Direct sound drops off with the inverse-distance law (distance_gain).
-           Reverberant room reflections integrate acoustic energy over the room volume,
-           decaying only mildly with distance. This DRR gradient provides the
-           primary physical acoustic cue for indoor auditory distance perception. */
-        const double room_dist_factor = 1.0 / sqrt(1.0 + 0.15 * d);
+        /* Space is loudness-neutral: adding room shifts the direct/room
+           balance but does not raise the overall level, which stays on the
+           distance curve. HRTF_ROOM_ENERGY is the room's broadband energy per
+           unit send relative to the direct path (measured with pink noise). */
+        const double wet = space_gain * room_gain / direct_gain;
+        const double space_comp = 1.0 / sqrt(1.0 + k_room_energy * wet * wet);
 
-        float out0 = (float)((yl * gl * distance_gain + h->early_lpf_l * space_gain * room_dist_factor) * master_headroom);
-        float out1 = (float)((yr * gr * distance_gain + h->early_lpf_r * space_gain * room_dist_factor) * master_headroom);
+        float out0 = (float)((yl * gl * direct_gain + h->early_lpf_l * space_gain * room_gain) * space_comp);
+        float out1 = (float)((yr * gr * direct_gain + h->early_lpf_r * space_gain * room_gain) * space_comp);
 
-        /* Soft-knee saturation ceiling: guarantees peak amplitude never exceeds 0 dBFS */
+        /* Soft-knee saturation ceiling: guarantees peak amplitude never exceeds
+           0 dBFS. With the level calibration above it only engages when a hot
+           input meets a filter boost. */
         stereo[0][i] = soft_limit(out0);
         stereo[1][i] = soft_limit(out1);
 
@@ -687,7 +802,33 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
     if (pulse_dur > 0.75 * sec_per_beat)
         pulse_dur = 0.75 * sec_per_beat;
 
+    /* A pulse shorter than its attack plus release would never reach the
+       release ramp and would be cut off mid-attack with a click. Shrink both
+       ramps proportionally so the envelope always closes smoothly. */
+    if (t_att + t_rel > pulse_dur) {
+        const double k = pulse_dur / (t_att + t_rel);
+        t_att *= k;
+        t_rel *= k;
+    }
+
     const double beats_per_sample = bpm / (60.0 * fs);
+    const float rumble_coeff = (float)(1.0 - exp(-2.0 * HRTF_PI * 160.0 / fs)); /* ~160 Hz */
+
+    /* Keep the sine burst below Nyquist at any sample rate. */
+    double sine_freq = gen->freq_hz > 20.0 ? gen->freq_hz : 1000.0;
+    if (sine_freq > 0.45 * fs) sine_freq = 0.45 * fs;
+
+    /* A tempo change can leave the free-running counter beyond the new beat length. */
+    if (!is_playing && gen->free_sample_counter >= samples_per_beat)
+        gen->free_sample_counter = fmod(gen->free_sample_counter, samples_per_beat);
+
+    /* Steepest per-sample change a raised-cosine ramp of length T can make is
+       pi / (2 T fs). Limiting the envelope to (just above) that leaves every
+       normal pulse untouched, but turns a jump into the middle of a pulse
+       (playback starting mid-pulse, a loop or locate, a tempo change) into
+       a ramp as smooth as the pulse's own attack instead of a click. */
+    const double t_ramp_min = (t_att < t_rel) ? t_att : t_rel;
+    const float env_max_step = (float)(1.01 * HRTF_PI / (2.0 * t_ramp_min * fs));
 
     for (size_t i = 0; i < n; ++i) {
         double t_in_beat = 0.0;
@@ -729,12 +870,14 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
                 envelope = 1.0f;
             }
         }
+        if (envelope > gen->env + env_max_step) envelope = gen->env + env_max_step;
+        else if (envelope < gen->env - env_max_step) envelope = gen->env - env_max_step;
+        gen->env = envelope;
 
         if (mode == HRTF_TEST_MODE_SINE) {
             /* Sine burst at freq_hz */
-            double freq = gen->freq_hz > 20.0 ? gen->freq_hz : 1000.0;
             float s = (float)sin(gen->sine_phase);
-            gen->sine_phase += 2.0 * HRTF_PI * freq / fs;
+            gen->sine_phase += 2.0 * HRTF_PI * sine_freq / fs;
             if (gen->sine_phase >= 2.0 * HRTF_PI) gen->sine_phase -= 2.0 * HRTF_PI;
             out_mono[i] = s * 0.25f * envelope;
             continue;
@@ -757,7 +900,6 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
         gen->b6 = white * 0.115926f;
 
         /* 1-pole low-pass rumble filter (~160 Hz cutoff) */
-        const float rumble_coeff = (float)(1.0 - exp(-2.0 * HRTF_PI * 160.0 / fs));
         gen->rumble_lpf += rumble_coeff * (white - gen->rumble_lpf);
 
         float sig = 0.0f;
@@ -777,3 +919,50 @@ void hrtf_test_gen_process(HrtfTestGen *gen, float *out_mono, size_t n, double b
     }
 }
 
+void hrtf_test_gen_render(HrtfTestGen *gen, const float *in, float *out, size_t n,
+                          double bpm, double beat_pos, int is_playing, int enabled)
+{
+    if (!gen || !out || n == 0) return;
+
+    const double fs = gen->sample_rate;
+    const double target = enabled ? 1.0 : 0.0;
+
+    /* Settled: pass the input through, or replace it outright. */
+    if (gen->mix == target) {
+        if (enabled) {
+            hrtf_test_gen_process(gen, out, n, bpm, beat_pos, is_playing);
+        } else if (in != out) {
+            if (in) memmove(out, in, n * sizeof(float));
+            else memset(out, 0, n * sizeof(float));
+        }
+        return;
+    }
+
+    /* Switching: crossfade between the input and the generator over 5 ms so
+       ticking the Test Pulse box on or off never cuts a sound in half. The
+       generator runs in small chunks on the stack, so `in` may alias `out`. */
+    const double step = 1.0 / (0.005 * fs);
+    const double beats_per_sample = (bpm >= 20.0 && bpm <= 400.0 && isfinite(bpm))
+                                    ? bpm / (60.0 * fs) : 120.0 / (60.0 * fs);
+    float chunk[64];
+    size_t pos = 0;
+    while (pos < n) {
+        size_t m = n - pos;
+        if (m > 64) m = 64;
+        hrtf_test_gen_process(gen, chunk, m, bpm,
+                              beat_pos + (double)pos * beats_per_sample, is_playing);
+        for (size_t i = 0; i < m; ++i) {
+            if (gen->mix < target) {
+                gen->mix += step;
+                if (gen->mix > target) gen->mix = target;
+            } else if (gen->mix > target) {
+                gen->mix -= step;
+                if (gen->mix < target) gen->mix = target;
+            }
+            const float g = (float)gen->mix;
+            const float x = in ? in[pos + i] : 0.0f;
+            out[pos + i] = x + g * (chunk[i] - x);
+        }
+        pos += m;
+    }
+}
