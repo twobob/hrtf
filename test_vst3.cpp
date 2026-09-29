@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <cmath>
 #include <cstring>
+#include <cwchar>
 #include <vector>
 
 #include "pluginterfaces/base/ipluginbase.h"
@@ -299,9 +300,9 @@ int main()
     {
         controller->initialize(nullptr);
         std::cout << "Controller parameter count: " << controller->getParameterCount() << "\n";
-        if (controller->getParameterCount() != 7)
+        if (controller->getParameterCount() != RotatingHrtf::kParamCount)
         {
-            std::cerr << "ERROR: expected 7 parameters in controller, got " << controller->getParameterCount() << "\n";
+            std::cerr << "ERROR: expected 8 parameters in controller, got " << controller->getParameterCount() << "\n";
             ++failures;
         }
         for (Steinberg::int32 p = 0; p < controller->getParameterCount(); ++p)
@@ -309,6 +310,50 @@ int main()
             Steinberg::Vst::ParameterInfo pInfo = {};
             controller->getParameterInfo(p, pInfo);
             std::wcout << L"    Param " << p << L": ID=" << pInfo.id << L", Title=" << (wchar_t*)pInfo.title << L", Units=" << (wchar_t*)pInfo.units << L"\n";
+        }
+
+        // Distance uses a logarithmic taper: half the travel is 5 cm to 1 m,
+        // and the default (2 m) sits on that curve.
+        {
+            const double midPlain = controller->normalizedParamToPlain (RotatingHrtf::kParamDistance, 0.5);
+            const double defNorm = controller->plainParamToNormalized (RotatingHrtf::kParamDistance, 2.0);
+            Steinberg::Vst::ParameterInfo dInfo = {};
+            controller->getParameterInfo (0, dInfo);
+            Steinberg::Vst::String128 midText = {};
+            controller->getParamStringByValue (RotatingHrtf::kParamDistance, 0.5, midText);
+            if (std::abs (midPlain - 1.0) < 1e-9 &&
+                std::abs (dInfo.defaultNormalizedValue - defNorm) < 1e-9 &&
+                std::abs (defNorm - hrtf_position_from_distance (2.0)) < 1e-12)
+            {
+                std::wcout << L"SUCCESS: Distance taper is logarithmic (mid-travel = " << (wchar_t*)midText << L" m, default 2 m at "
+                           << defNorm << L").\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: Distance taper wrong (mid-travel " << midPlain << " m, default norm "
+                          << dInfo.defaultNormalizedValue << " vs " << defNorm << ")\n";
+                ++failures;
+            }
+        }
+
+        // Reflections and Test Pulse are On/Off switches with readable labels.
+        {
+            Steinberg::Vst::ParameterInfo rInfo = {};
+            controller->getParameterInfo (7, rInfo);
+            Steinberg::Vst::String128 onText = {}, offText = {};
+            controller->getParamStringByValue (RotatingHrtf::kParamReflections, 1.0, onText);
+            controller->getParamStringByValue (RotatingHrtf::kParamTestPulse, 0.0, offText);
+            if (rInfo.id == RotatingHrtf::kParamReflections && rInfo.stepCount == 1 &&
+                rInfo.defaultNormalizedValue == 1.0 &&
+                std::wcscmp ((wchar_t*)onText, L"On") == 0 && std::wcscmp ((wchar_t*)offText, L"Off") == 0)
+            {
+                std::cout << "SUCCESS: Reflections switch defaults to On and switches read Off/On.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: Reflections/Test Pulse switch definition wrong\n";
+                ++failures;
+            }
         }
 
         // Test Controller setComponentState, parameter restoration, and restartComponent dispatch
@@ -325,6 +370,7 @@ int main()
             ctrlStream.writeVal<double> (1.00); // Test Pulse
             ctrlStream.writeVal<double> (0.80); // Test Tone
             ctrlStream.writeVal<double> (0.65); // Ear Scale
+            ctrlStream.writeVal<double> (0.00); // Reflections (off)
             ctrlStream.cursor = 0;
 
             Steinberg::tresult cRes = controller->setComponentState (&ctrlStream);
@@ -353,11 +399,12 @@ int main()
                 Steinberg::Vst::ParamValue pV = controller->getParamNormalized (RotatingHrtf::kParamTestPulse);
                 Steinberg::Vst::ParamValue tV = controller->getParamNormalized (RotatingHrtf::kParamTestTone);
                 Steinberg::Vst::ParamValue esV = controller->getParamNormalized (RotatingHrtf::kParamEarScale);
+                Steinberg::Vst::ParamValue rfV = controller->getParamNormalized (RotatingHrtf::kParamReflections);
 
                 if (std::abs (dV - 0.75) < 1e-6 && std::abs (rV - 0.33) < 1e-6 &&
                     std::abs (eV - 0.60) < 1e-6 && std::abs (sV - 0.45) < 1e-6 &&
                     std::abs (pV - 1.00) < 1e-6 && std::abs (tV - 0.80) < 1e-6 &&
-                    std::abs (esV - 0.65) < 1e-6)
+                    std::abs (esV - 0.65) < 1e-6 && std::abs (rfV) < 1e-6)
                 {
                     std::cout << "SUCCESS: controller->setComponentState restored all normalised parameter values accurately.\n";
                 }
@@ -370,13 +417,13 @@ int main()
 
             // Test hostile streams on controller->setComponentState: null, truncated header, truncated payload, invalid version
             // All hostile streams must be rejected (kResultFalse) AND leave all parameters untouched.
-            Steinberg::Vst::ParamValue ctrlBaseline[7];
-            for (int pIdx = 0; pIdx < 7; ++pIdx)
+            Steinberg::Vst::ParamValue ctrlBaseline[RotatingHrtf::kParamCount];
+            for (int pIdx = 0; pIdx < RotatingHrtf::kParamCount; ++pIdx)
                 ctrlBaseline[pIdx] = controller->getParamNormalized (RotatingHrtf::kParamDistance + pIdx);
 
             auto verifyCtrlUnchanged = [&](const char* testName) {
                 bool ok = true;
-                for (int pIdx = 0; pIdx < 7; ++pIdx)
+                for (int pIdx = 0; pIdx < RotatingHrtf::kParamCount; ++pIdx)
                 {
                     Steinberg::Vst::ParamValue cur = controller->getParamNormalized (RotatingHrtf::kParamDistance + pIdx);
                     if (cur != ctrlBaseline[pIdx])
@@ -431,7 +478,7 @@ int main()
 
             TestMemStream ctrlBadVer;
             ctrlBadVer.writeVal<Steinberg::int32> (99); // bad version
-            for (int i = 0; i < 7; ++i) ctrlBadVer.writeVal<double> (0.5);
+            for (int i = 0; i < RotatingHrtf::kParamCount; ++i) ctrlBadVer.writeVal<double> (0.5);
             ctrlBadVer.cursor = 0;
             if (controller->setComponentState (&ctrlBadVer) == Steinberg::kResultFalse && verifyCtrlUnchanged ("bad version"))
             {
@@ -448,6 +495,46 @@ int main()
 
         controller->terminate();
         controller->release();
+    }
+
+    // Tail: the Test Pulse makes sound from silence, so hosts must never
+    // suspend processing on a quiet input.
+    if (processor->getTailSamples () == Steinberg::Vst::kInfiniteTail)
+    {
+        std::cout << "SUCCESS: VST3 processor declares an infinite tail (Test Pulse renders from silence).\n";
+    }
+    else
+    {
+        std::cerr << "ERROR: processor tail is " << processor->getTailSamples () << ", expected kInfiniteTail\n";
+        ++failures;
+    }
+
+    // Process context: hosts that honour IProcessContextRequirements only
+    // supply what is requested, and the tempo-synced Test Pulse needs these.
+    {
+        Steinberg::Vst::IProcessContextRequirements* req = nullptr;
+        if (processor->queryInterface (Steinberg::Vst::IProcessContextRequirements::iid, (void**)&req) == Steinberg::kResultTrue && req)
+        {
+            using PCR = Steinberg::Vst::IProcessContextRequirements;
+            const Steinberg::uint32 needed = PCR::kNeedTempo | PCR::kNeedProjectTimeMusic | PCR::kNeedTransportState;
+            const Steinberg::uint32 flags = req->getProcessContextRequirements ();
+            if ((flags & needed) == needed)
+            {
+                std::cout << "SUCCESS: processor requests tempo, musical position and transport state from the host.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: process context requirements are 0x" << std::hex << flags << std::dec
+                          << ", missing tempo/position/transport\n";
+                ++failures;
+            }
+            req->release ();
+        }
+        else
+        {
+            std::cerr << "ERROR: processor does not expose IProcessContextRequirements\n";
+            ++failures;
+        }
     }
 
     // Latency Declaration test
@@ -568,8 +655,9 @@ int main()
 
         Proc pa = makeProcessor (factory);
         Proc pb = makeProcessor (factory);
+        Proc pc = makeProcessor (factory); // reference: no parameter change at all
 
-        if (!pa.processor || !pb.processor)
+        if (!pa.processor || !pb.processor || !pc.processor)
         {
             std::cerr << "ERROR: could not create processors for the automation test\n";
             ++failures;
@@ -622,30 +710,45 @@ int main()
             dataB.outputs = &outBusB;
             dataB.inputParameterChanges = &changesB;
 
+            float c_l[NA] = {0}, c_r[NA] = {0};
+            float* outPtrsC[2] = { c_l, c_r };
+            Steinberg::Vst::AudioBusBuffers outBusC = {};
+            outBusC.numChannels = 2;
+            outBusC.channelBuffers32 = outPtrsC;
+            Steinberg::Vst::ProcessData dataC = dataA;
+            dataC.outputs = &outBusC;
+            dataC.inputParameterChanges = nullptr;
+
             pa.processor->process (dataA);
             pb.processor->process (dataB);
+            pc.processor->process (dataC);
 
-            const bool headEqual = memcmp (a_l, b_l, 64 * sizeof (float)) == 0;
-            const bool tailDiffers = memcmp (a_l + 64, b_l + 64, (NA - 64) * sizeof (float)) != 0;
+            // The first sample that differs from the unchanged reference must
+            // be exactly the requested offset: a quantised or block-start
+            // application would move it.
+            auto firstDiff = [&](const float* x) {
+                for (int i = 0; i < NA; ++i)
+                    if (x[i] != c_l[i]) return i;
+                return NA;
+            };
+            const int diffA = firstDiff (a_l);
+            const int diffB = firstDiff (b_l);
 
-            if (!headEqual)
+            if (diffA == 64 && diffB == 192)
             {
-                std::cerr << "ERROR: a parameter change at offset 64 or 192 affected the first 64 samples\n";
-                ++failures;
-            }
-            if (!tailDiffers)
-            {
-                std::cerr << "ERROR: parameter offsets were ignored - both blocks are identical\n";
-                ++failures;
+                std::cout << "SUCCESS: parameter changes are applied at their exact sample offsets (64 and 192).\n";
             }
             else
             {
-                std::cout << "SUCCESS: parameter changes are applied at their sample offset.\n";
+                std::cerr << "ERROR: parameter changes at offsets 64/192 first took effect at samples "
+                          << diffA << "/" << diffB << "\n";
+                ++failures;
             }
         }
 
         releaseProcessor (pa);
         releaseProcessor (pb);
+        releaseProcessor (pc);
     }
 
     // Oversized blocks: a host that exceeds maxSamplesPerBlock (256 here)
@@ -787,7 +890,7 @@ int main()
                 pulse_energy += std::abs (pulse_l[i]) + std::abs (pulse_r[i]);
             }
 
-            if (pulse_energy > 0.01) {
+            if (pulse_energy > 1.0) {
                 std::cout << "SUCCESS: Test Pulse generator synthesised audio from silent input (energy=" << pulse_energy << ").\n";
             } else {
                 std::cerr << "ERROR: Test Pulse generator failed to produce audio from silent input (energy=" << pulse_energy << ")\n";
@@ -861,7 +964,7 @@ int main()
                 diff += std::abs (out1_l[i] - out2_l[i]) + std::abs (out1_r[i] - out2_r[i]);
             }
 
-            if (diff > 0.01) {
+            if (diff > 5.0) {
                 std::cout << "SUCCESS: Test Tone parameter significantly alters synthesised pulse spectrum (diff=" << diff << ").\n";
             } else {
                 std::cerr << "ERROR: Test Tone parameter produced negligible difference (diff=" << diff << ")\n";
@@ -919,7 +1022,7 @@ int main()
                 diff += std::abs (out1_l[i] - out2_l[i]) + std::abs (out1_r[i] - out2_r[i]);
             }
 
-            if (diff > 0.01) {
+            if (diff > 20.0) {
                 std::cout << "SUCCESS: Anthropometric Ear Scale parameter shifts ITD delay and spectral pinna filtering (diff=" << diff << ").\n";
             } else {
                 std::cerr << "ERROR: Ear Scale parameter produced negligible difference (diff=" << diff << ")\n";
@@ -968,6 +1071,33 @@ int main()
         {
             std::cout << "SUCCESS: process() survived a null input buffer array.\n";
         }
+
+        // Parameter changes delivered alongside null output buffers must
+        // still be applied, not dropped with the unrenderable block.
+        if (comp)
+        {
+            DummyChanges spaceChange;
+            spaceChange.q.id = RotatingHrtf::kParamSpace;
+            spaceChange.q.val = 0.625;
+            Steinberg::Vst::ProcessData nullOutChange = nullOutData;
+            nullOutChange.inputParameterChanges = &spaceChange;
+            processor->process (nullOutChange);
+
+            TestMemStream st;
+            comp->getState (&st);
+            double spaceNorm = -1.0;
+            if (st.buffer.size () >= 4 + 4 * sizeof (double))
+                std::memcpy (&spaceNorm, st.buffer.data () + 4 + 3 * sizeof (double), sizeof (double));
+            if (spaceNorm == 0.625)
+            {
+                std::cout << "SUCCESS: parameter changes are applied even when the output buffers are null.\n";
+            }
+            else
+            {
+                std::cerr << "ERROR: parameter change lost with null output buffers (space=" << spaceNorm << ")\n";
+                ++failures;
+            }
+        }
     }
 
     // State Serialisation tests
@@ -975,7 +1105,7 @@ int main()
     {
         TestMemStream saveStream;
         Steinberg::tresult saveRes = comp->getState(&saveStream);
-        if (saveRes != Steinberg::kResultOk || saveStream.buffer.size() != 60)
+        if (saveRes != Steinberg::kResultOk || saveStream.buffer.size() != 68)
         {
             std::cerr << "ERROR: comp->getState() failed or returned unexpected byte count (" << saveStream.buffer.size() << ", expected 60)\n";
             ++failures;
@@ -1006,7 +1136,7 @@ int main()
                 comp->getState(&verifyStream);
                 if (verifyStream.buffer == saveStream.buffer)
                 {
-                    std::cout << "SUCCESS: VST3 processor state round-trip preserved all 7 parameters identically.\n";
+                    std::cout << "SUCCESS: VST3 processor state round-trip preserved all 8 parameters identically.\n";
                 }
                 else
                 {
@@ -1073,7 +1203,7 @@ int main()
 
         TestMemStream badVerStream;
         badVerStream.writeVal<Steinberg::int32> (99); // bad version
-        for (int i = 0; i < 7; ++i) badVerStream.writeVal<double> (0.5);
+        for (int i = 0; i < RotatingHrtf::kParamCount; ++i) badVerStream.writeVal<double> (0.5);
         badVerStream.cursor = 0;
         if (comp->setState (&badVerStream) == Steinberg::kResultFalse && verifyProcUnchanged ("invalid version"))
         {
