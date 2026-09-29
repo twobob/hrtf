@@ -43,10 +43,10 @@ static inline double get_atomic_double(const volatile double *target) {
 
 #include "hrtf_core.h"
 
-#define PLUGIN_ID "com.example.rotating-hrtf-v2"
+#define PLUGIN_ID "psipi.hrtf"
 #define PLUGIN_NAME "Rotating HRTF v2"
-#define PLUGIN_VENDOR "Example Audio"
-#define PLUGIN_VERSION "2.0.0"
+#define PLUGIN_VENDOR "psipi"
+#define PLUGIN_VERSION "2.0.1"
 
 enum {
     PARAM_DISTANCE = 1,
@@ -55,25 +55,32 @@ enum {
     PARAM_SPACE = 4,
     PARAM_TEST_PULSE = 5,
     PARAM_TEST_TONE = 6,
-    PARAM_EAR_SCALE = 7
+    PARAM_EAR_SCALE = 7,
+    PARAM_REFLECTIONS = 8
 };
+
+#define PARAM_COUNT 8u
+
+/* Default Distance position: 2 m on the logarithmic 0.05..20 m taper. */
+#define DISTANCE_DEFAULT_POS hrtf_position_from_distance(2.0)
 
 typedef struct {
     clap_plugin_t plugin;
     const clap_host_t *host;
     HrtfCore *core;
     double sample_rate;
-    volatile double distance_m;
+    volatile double distance_pos;  /* 0..1, see hrtf_distance_from_position() */
     volatile double rotation_phase;
     volatile double elevation_deg;
     volatile double space;
     volatile double test_pulse;
     volatile double test_tone;
     volatile double ear_scale;
+    volatile double reflections;   /* 1 = on, 0 = bypassed */
     HrtfTestGen test_gen;
     float *silence;            /* zeros, used when the input port is inactive */
     size_t silence_frames;
-    float *test_buf;           /* scratch buffer for synthesised test pulses */
+    float *test_buf;           /* scratch: synthesised test pulses or the stereo downmix */
 } RotatingHrtf;
 
 static const char *features[] = {
@@ -92,7 +99,7 @@ static const clap_plugin_descriptor_t descriptor = {
     .manual_url = "",
     .support_url = "",
     .version = PLUGIN_VERSION,
-    .description = "Mono-to-stereo rotating head/pinna HRTF-ready renderer.",
+    .description = "Rotating binaural HRTF spatialiser (mono source to headphone stereo).",
     .features = features
 };
 
@@ -107,19 +114,32 @@ static double wrap_unit(double x)
     return x < 0.0 ? x + 1.0 : x;
 }
 
+/* Push every DSP parameter from the shared atomics into the core. */
+static void sync_core(RotatingHrtf *p)
+{
+    if (!p->core) return;
+    hrtf_set_distance(p->core, hrtf_distance_from_position(get_atomic_double(&p->distance_pos)));
+    hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
+    hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
+    hrtf_set_space(p->core, get_atomic_double(&p->space));
+    hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
+    hrtf_set_reflections(p->core, get_atomic_double(&p->reflections) >= 0.5);
+}
+
 /* ------------------------------ lifecycle ------------------------------ */
 
 static bool plugin_init(const clap_plugin_t *plugin)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     p->sample_rate = 48000.0;
-    set_atomic_double(&p->distance_m, 2.0);
+    set_atomic_double(&p->distance_pos, DISTANCE_DEFAULT_POS);
     set_atomic_double(&p->rotation_phase, 0.0);
     set_atomic_double(&p->elevation_deg, 0.0);
     set_atomic_double(&p->space, 0.15);
     set_atomic_double(&p->test_pulse, 0.0);
     set_atomic_double(&p->test_tone, 0.5);
     set_atomic_double(&p->ear_scale, 1.0);
+    set_atomic_double(&p->reflections, 1.0);
     hrtf_test_gen_init(&p->test_gen, p->sample_rate);
     hrtf_test_gen_set_tone(&p->test_gen, 0.5);
     return true;
@@ -170,11 +190,7 @@ static bool plugin_activate(const clap_plugin_t *plugin,
         return false;
     }
 
-    hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
-    hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
-    hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
-    hrtf_set_space(p->core, get_atomic_double(&p->space));
-    hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
+    sync_core(p);
     hrtf_test_gen_init(&p->test_gen, sample_rate);
     hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
     hrtf_reset(p->core);
@@ -210,12 +226,11 @@ static void plugin_reset(const clap_plugin_t *plugin)
 {
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!p->core) return;
-    hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
-    hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
-    hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
-    hrtf_set_space(p->core, get_atomic_double(&p->space));
-    hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
+    sync_core(p);
     hrtf_reset(p->core);
+    /* Restart the Test Pulse from the top of a beat, fading in if it is on. */
+    hrtf_test_gen_init(&p->test_gen, p->sample_rate);
+    hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
 }
 
 /* ------------------------------ audio ports ------------------------------ */
@@ -223,7 +238,8 @@ static void plugin_reset(const clap_plugin_t *plugin)
 static uint32_t audio_ports_count(const clap_plugin_t *plugin, bool is_input)
 {
     (void)plugin;
-    return is_input ? 1u : 1u;
+    (void)is_input;
+    return 1u;
 }
 
 static bool audio_ports_get(const clap_plugin_t *plugin,
@@ -234,15 +250,19 @@ static bool audio_ports_get(const clap_plugin_t *plugin,
     (void)plugin;
     if (!info || index != 0) return false;
 
+    /* The input is stereo, like the VST3 default bus, and is downmixed to the
+       mono point source. A mono input port would make hosts that map ports
+       channel-for-channel (e.g. REAPER pins) drop the right channel of a
+       stereo track. process() still accepts a single-channel buffer. */
     memset(info, 0, sizeof(*info));
     info->id = is_input ? 0u : 1u;
     info->flags = CLAP_AUDIO_PORT_IS_MAIN;
-    info->channel_count = is_input ? 1u : 2u;
-    info->port_type = is_input ? CLAP_PORT_MONO : CLAP_PORT_STEREO;
+    info->channel_count = 2u;
+    info->port_type = CLAP_PORT_STEREO;
     info->in_place_pair = CLAP_INVALID_ID;
 
     if (is_input) {
-        snprintf(info->name, sizeof(info->name), "Mono Source");
+        snprintf(info->name, sizeof(info->name), "Audio Input");
     } else {
         snprintf(info->name, sizeof(info->name), "Binaural Output");
     }
@@ -259,7 +279,7 @@ static const clap_plugin_audio_ports_t audio_ports_ext = {
 static uint32_t params_count(const clap_plugin_t *plugin)
 {
     (void)plugin;
-    return 7u;
+    return PARAM_COUNT;
 }
 
 static bool params_get_info(const clap_plugin_t *plugin,
@@ -267,18 +287,21 @@ static bool params_get_info(const clap_plugin_t *plugin,
                             clap_param_info_t *info)
 {
     (void)plugin;
-    if (!info || index >= 7u) return false;
+    if (!info || index >= PARAM_COUNT) return false;
 
     memset(info, 0, sizeof(*info));
 
     if (index == 0u) {
+        /* CLAP hosts draw and automate parameters linearly between min and
+           max, so the logarithmic distance taper is expressed as a 0..1
+           position; value_to_text and text_to_value speak metres. */
         info->id = PARAM_DISTANCE;
         info->flags = CLAP_PARAM_IS_AUTOMATABLE | CLAP_PARAM_REQUIRES_PROCESS;
         snprintf(info->name, sizeof(info->name), "Distance");
         snprintf(info->module, sizeof(info->module), "Position");
-        info->min_value = 0.05;
-        info->max_value = 20.0;
-        info->default_value = 2.0;
+        info->min_value = 0.0;
+        info->max_value = 1.0;
+        info->default_value = DISTANCE_DEFAULT_POS;
     } else if (index == 1u) {
         info->id = PARAM_ROTATION;
         info->flags = CLAP_PARAM_IS_AUTOMATABLE |
@@ -331,6 +354,16 @@ static bool params_get_info(const clap_plugin_t *plugin,
         info->min_value = 0.70;
         info->max_value = 1.30;
         info->default_value = 1.00;
+    } else if (index == 7u) {
+        info->id = PARAM_REFLECTIONS;
+        info->flags = CLAP_PARAM_IS_AUTOMATABLE |
+                      CLAP_PARAM_IS_STEPPED |
+                      CLAP_PARAM_REQUIRES_PROCESS;
+        snprintf(info->name, sizeof(info->name), "Reflections");
+        snprintf(info->module, sizeof(info->module), "Room");
+        info->min_value = 0.0;
+        info->max_value = 1.0;
+        info->default_value = 1.0;
     }
     return true;
 }
@@ -343,7 +376,11 @@ static bool params_get_value(const clap_plugin_t *plugin,
     if (!out_value) return false;
 
     if (param_id == PARAM_DISTANCE) {
-        *out_value = get_atomic_double(&p->distance_m);
+        *out_value = get_atomic_double(&p->distance_pos);
+        return true;
+    }
+    if (param_id == PARAM_REFLECTIONS) {
+        *out_value = get_atomic_double(&p->reflections);
         return true;
     }
     if (param_id == PARAM_ROTATION) {
@@ -383,7 +420,11 @@ static bool params_value_to_text(const clap_plugin_t *plugin,
     if (!out_buffer || out_buffer_capacity == 0) return false;
 
     if (param_id == PARAM_DISTANCE) {
-        snprintf(out_buffer, out_buffer_capacity, "%.3g m", value);
+        snprintf(out_buffer, out_buffer_capacity, "%.3g m", hrtf_distance_from_position(value));
+        return true;
+    }
+    if (param_id == PARAM_REFLECTIONS) {
+        snprintf(out_buffer, out_buffer_capacity, "%s", value >= 0.5 ? "On" : "Off");
         return true;
     }
     if (param_id == PARAM_ROTATION) {
@@ -423,7 +464,7 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
     (void)plugin;
     if (!text || !out_value) return false;
 
-    if (param_id == PARAM_TEST_PULSE) {
+    if (param_id == PARAM_TEST_PULSE || param_id == PARAM_REFLECTIONS) {
         if (_stricmp(text, "on") == 0 || strcmp(text, "1") == 0 || _stricmp(text, "true") == 0) {
             *out_value = 1.0;
             return true;
@@ -444,25 +485,34 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
     while (*end == ' ' || *end == '\t') ++end;
 
     if (param_id == PARAM_DISTANCE) {
-        if (*end == 'm' || *end == 'M') ++end;
+        /* Text is metres (optionally "cm"); the value is the taper position. */
+        if ((end[0] == 'c' || end[0] == 'C') && (end[1] == 'm' || end[1] == 'M')) {
+            v /= 100.0;
+            end += 2;
+        } else if (*end == 'm' || *end == 'M') {
+            ++end;
+        }
         while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
-        if (v < 0.05 || v > 20.0) return false;
-        *out_value = v;
+        if (v < HRTF_DISTANCE_MIN_M || v > HRTF_DISTANCE_MAX_M) return false;
+        *out_value = hrtf_position_from_distance(v);
         return true;
     }
 
     if (param_id == PARAM_ROTATION) {
+        bool has_deg = false;
         if (*end == 'd' || *end == 'D') {
             if (end[1] == 'e' || end[1] == 'E') {
-                if (end[2] == 'g' || end[2] == 'G') end += 3;
+                if (end[2] == 'g' || end[2] == 'G') { end += 3; has_deg = true; }
             }
         }
         while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
 
-        /* Text without degrees is interpreted as phase [0,1]. */
-        if (v > 1.0 || v < -1.0) {
+        /* An explicit "deg" suffix is always degrees, so value_to_text output
+           such as "0.4 deg" round-trips. Bare numbers within [-1, 1] are read
+           as phase and larger ones as degrees. */
+        if (has_deg || v > 1.0 || v < -1.0) {
             v = v / 360.0;
         }
         v -= floor(v);
@@ -495,7 +545,7 @@ static bool params_text_to_value(const clap_plugin_t *plugin,
         return true;
     }
 
-    if (param_id == PARAM_TEST_PULSE) {
+    if (param_id == PARAM_TEST_PULSE || param_id == PARAM_REFLECTIONS) {
         while (*end == ' ' || *end == '\t') ++end;
         if (*end != '\0') return false;
         *out_value = (v >= 0.5) ? 1.0 : 0.0;
@@ -534,9 +584,11 @@ static void params_apply_value(RotatingHrtf *p, clap_id id, double value)
     if (!isfinite(value)) return;
 
     if (id == PARAM_DISTANCE) {
-        if (value < 0.05) value = 0.05;
-        if (value > 20.0) value = 20.0;
-        set_atomic_double(&p->distance_m, value);
+        if (value < 0.0) value = 0.0;
+        if (value > 1.0) value = 1.0;
+        set_atomic_double(&p->distance_pos, value);
+    } else if (id == PARAM_REFLECTIONS) {
+        set_atomic_double(&p->reflections, (value >= 0.5) ? 1.0 : 0.0);
     } else if (id == PARAM_ROTATION) {
         value -= floor(value);
         if (value < 0.0) value += 1.0;
@@ -602,14 +654,15 @@ static bool state_save(const clap_plugin_t *plugin, const clap_ostream_t *stream
     RotatingHrtf *p = self_from_plugin(plugin);
     if (!stream || !stream->write) return false;
 
-    double values[7];
-    values[0] = get_atomic_double(&p->distance_m);
+    double values[PARAM_COUNT];
+    values[0] = get_atomic_double(&p->distance_pos);
     values[1] = get_atomic_double(&p->rotation_phase);
     values[2] = get_atomic_double(&p->elevation_deg);
     values[3] = get_atomic_double(&p->space);
     values[4] = get_atomic_double(&p->test_pulse);
     values[5] = get_atomic_double(&p->test_tone);
     values[6] = get_atomic_double(&p->ear_scale);
+    values[7] = get_atomic_double(&p->reflections);
 
     if (stream->write(stream, kStateMagic, sizeof(kStateMagic)) != (int64_t)sizeof(kStateMagic))
         return false;
@@ -634,10 +687,10 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     if (stream->read(stream, &version, sizeof(version)) != (int64_t)sizeof(version)) return false;
     if (version != kStateVersion) return false;
 
-    double values[7];
+    double values[PARAM_COUNT];
     if (stream->read(stream, values, sizeof(values)) != (int64_t)sizeof(values)) return false;
-    if (isfinite(values[0]) && values[0] >= 0.05 && values[0] <= 20.0) {
-        set_atomic_double(&p->distance_m, values[0]);
+    if (isfinite(values[0]) && values[0] >= 0.0 && values[0] <= 1.0) {
+        set_atomic_double(&p->distance_pos, values[0]);
     }
     if (isfinite(values[1])) {
         double phase = wrap_unit(values[1]);
@@ -657,6 +710,9 @@ static bool state_load(const clap_plugin_t *plugin, const clap_istream_t *stream
     }
     if (isfinite(values[6]) && values[6] >= 0.70 && values[6] <= 1.30) {
         set_atomic_double(&p->ear_scale, values[6]);
+    }
+    if (isfinite(values[7]) && values[7] >= 0.0 && values[7] <= 1.0) {
+        set_atomic_double(&p->reflections, (values[7] >= 0.5) ? 1.0 : 0.0);
     }
 
     if (p->host) {
@@ -688,21 +744,21 @@ static void apply_event(RotatingHrtf *p, const clap_event_header_t *h)
     params_apply_value(p, e->param_id, e->value);
 
     /* Audio thread: sample-accurate parameter updates at current offset */
-    if (p->core) {
-        if (e->param_id == PARAM_DISTANCE)
-            hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
-        else if (e->param_id == PARAM_ROTATION)
-            hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
-        else if (e->param_id == PARAM_ELEVATION)
-            hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
-        else if (e->param_id == PARAM_SPACE)
-            hrtf_set_space(p->core, get_atomic_double(&p->space));
-        else if (e->param_id == PARAM_EAR_SCALE)
-            hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
-    }
+    sync_core(p);
     if (e->param_id == PARAM_TEST_TONE) {
         hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
     }
+}
+
+/* Apply every event from *index onwards. Used when the block cannot be
+   rendered, or for events stamped at or beyond the end of the block, so no
+   parameter change the host sent is ever silently dropped. */
+static void apply_remaining_events(RotatingHrtf *p, const clap_input_events_t *in_events,
+                                   uint32_t *index, uint32_t count)
+{
+    if (!in_events) return;
+    for (; *index < count; ++*index)
+        apply_event(p, in_events->get(in_events, *index));
 }
 
 static clap_process_status plugin_process(const clap_plugin_t *plugin,
@@ -713,6 +769,10 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
     if (!p->core || !process)
         return CLAP_PROCESS_ERROR;
 
+    uint32_t event_index = 0;
+    const uint32_t event_count =
+        process->in_events ? process->in_events->size(process->in_events) : 0;
+
     /* A port the host has deactivated is expressed as a null data32 array.
        Nothing to render into is not an error, and neither is silence in. */
     const clap_audio_buffer_t *in =
@@ -721,27 +781,28 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
         process->audio_outputs_count > 0 ? &process->audio_outputs[0] : NULL;
 
     if (!out || !out->data32 || out->channel_count < 2 ||
-        !out->data32[0] || !out->data32[1])
+        !out->data32[0] || !out->data32[1]) {
+        apply_remaining_events(p, process->in_events, &event_index, event_count);
         return CLAP_PROCESS_CONTINUE;
+    }
 
     const bool input_active =
         in && in->data32 && in->channel_count >= 1 && in->data32[0];
+    const bool input_stereo =
+        input_active && in->channel_count >= 2 && in->data32[1];
 
-    if (process->frames_count > p->silence_frames)
-        return CLAP_PROCESS_ERROR; /* host broke the max_frames_count contract */
+    if (process->frames_count > p->silence_frames) {
+        /* host broke the max_frames_count contract */
+        apply_remaining_events(p, process->in_events, &event_index, event_count);
+        return CLAP_PROCESS_ERROR;
+    }
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
     const unsigned int old_mxcsr = _mm_getcsr();
     _mm_setcsr(old_mxcsr | 0x8040); /* Enable FTZ (bit 15) and DAZ (bit 6) */
 #endif
 
-    if (p->core) {
-        hrtf_set_distance(p->core, get_atomic_double(&p->distance_m));
-        hrtf_set_rotation_phase(p->core, get_atomic_double(&p->rotation_phase));
-        hrtf_set_elevation_deg(p->core, get_atomic_double(&p->elevation_deg));
-        hrtf_set_space(p->core, get_atomic_double(&p->space));
-        hrtf_set_ear_scale(p->core, get_atomic_double(&p->ear_scale));
-    }
+    sync_core(p);
     hrtf_test_gen_set_tone(&p->test_gen, get_atomic_double(&p->test_tone));
 
     const float *src = input_active ? in->data32[0] : p->silence;
@@ -752,8 +813,6 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
 
     uint32_t frame_count = process->frames_count;
     uint32_t cursor = 0;
-    uint32_t event_index = 0;
-    uint32_t event_count = process->in_events ? process->in_events->size(process->in_events) : 0;
 
     while (cursor < frame_count) {
         uint32_t next = frame_count;
@@ -776,7 +835,21 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
             const uint32_t slice = next - cursor;
             const float *segment_src = NULL;
 
-            if (get_atomic_double(&p->test_pulse) >= 0.5) {
+            if (input_stereo) {
+                /* Downmix to the mono point source, as the VST3 wrapper does. */
+                const float *in_l = in->data32[0] + cursor;
+                const float *in_r = in->data32[1] + cursor;
+                for (uint32_t j = 0; j < slice; ++j)
+                    p->test_buf[j] = 0.5f * (in_l[j] + in_r[j]);
+                segment_src = p->test_buf;
+            } else {
+                segment_src = src + cursor;
+            }
+
+            /* The Test Pulse replaces the input, crossfading whenever it is
+               switched so neither edge clicks. */
+            const int pulse_on = get_atomic_double(&p->test_pulse) >= 0.5;
+            if (pulse_on || p->test_gen.mix > 0.0) {
                 double bpm = 120.0;
                 double beat_pos = 0.0;
                 int is_playing = 0;
@@ -793,10 +866,9 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
                 if (is_playing && p->sample_rate > 1000.0) {
                     slice_beat += (double)cursor * (bpm / (60.0 * p->sample_rate));
                 }
-                hrtf_test_gen_process(&p->test_gen, p->test_buf, slice, bpm, slice_beat, is_playing);
+                hrtf_test_gen_render(&p->test_gen, segment_src, p->test_buf, slice,
+                                     bpm, slice_beat, is_playing, pulse_on);
                 segment_src = p->test_buf;
-            } else {
-                segment_src = src + cursor;
             }
 
             hrtf_process(p->core, segment_src, dst, slice);
@@ -826,6 +898,10 @@ static clap_process_status plugin_process(const clap_plugin_t *plugin,
            If the event list contains pathological duplicate/old timestamps,
            the event index still advances, preventing an infinite loop. */
     }
+
+    /* Events stamped beyond the block (or any event in a zero-length block)
+       take effect from the next block rather than being lost. */
+    apply_remaining_events(p, process->in_events, &event_index, event_count);
 
 #if defined(_M_X64) || defined(__x86_64__) || defined(_M_IX86) || defined(__i386__)
     _mm_setcsr(old_mxcsr);
@@ -877,12 +953,15 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *factory,
 
     if (!host || !plugin_id || strcmp(plugin_id, PLUGIN_ID) != 0)
         return NULL;
+    if (!clap_version_is_compatible(host->clap_version))
+        return NULL;
 
     RotatingHrtf *p = (RotatingHrtf *)calloc(1, sizeof(*p));
     if (!p) return NULL;
 
     p->host = host;
-    p->distance_m = 2.0;
+    p->distance_pos = DISTANCE_DEFAULT_POS;
+    p->reflections = 1.0;
     p->rotation_phase = 0.0;
     p->elevation_deg = 0.0;
     p->space = 0.15;
