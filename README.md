@@ -45,14 +45,21 @@ Positions are calculated using spherical coordinate conventions:
 - $\theta$: Azimuth phase $[0, 1)$ corresponding to $[0^\circ, 360^\circ)$ ($0^\circ = \text{front}$, $90^\circ = \text{right}$, $180^\circ = \text{rear}$, $270^\circ = \text{left}$).
 - $\phi$: Elevation angle $[-90^\circ, +90^\circ]$ ($-90^\circ = \text{below}$, $0^\circ = \text{horizontal}$, $+90^\circ = \text{overhead}$).
 - Direction cosines:
-  $$s = \cos\phi \sin\theta \quad \text{(Lateral projection: } -1 = \text{left}, +1 = \text{right)}$$
-  $$c = \cos\phi \cos\theta \quad \text{(Front/Rear projection: } +1 = \text{front}, -1 = \text{rear)}$$
-  $$v = \sin\phi \quad \text{(Vertical projection: } +1 = \text{overhead}, -1 = \text{below)}$$
+  - $s = \cos\phi \sin\theta$ (Lateral projection: $-1 = \text{left}$, $+1 = \text{right}$)
+  - $c = \cos\phi \cos\theta$ (Front/Rear projection: $+1 = \text{front}$, $-1 = \text{rear}$)
+  - $v = \sin\phi$ (Vertical projection: $+1 = \text{overhead}$, $-1 = \text{below}$)
 
 ### 2. Interaural Time Difference (ITD)
 Calculated via Woodworth's spherical head acoustic ray-tracing model coupled with 4-point Hermite cubic fractional delay interpolation:
-$$\text{scale}_{\text{woodworth}}(\theta) = \frac{\sin\theta_{\text{lat}} + \theta_{\text{lat}}}{1.0 + \frac{\pi}{2}}$$
-$$\text{ITD}(s, d, \alpha) = \text{ITD}_{\max} \cdot \text{scale}_{\text{woodworth}}(\theta) \cdot \text{scale}_{\text{nf}}(d) \cdot \alpha$$
+
+$$
+\text{scale}_{\text{woodworth}}(\theta) = \frac{\sin\theta_{\text{lat}} + \theta_{\text{lat}}}{1.0 + \frac{\pi}{2}}
+$$
+
+$$
+\text{ITD}(s, d, \alpha) = \text{ITD}_{\max} \cdot \text{scale}_{\text{woodworth}}(\theta) \cdot \text{scale}_{\text{nf}}(d) \cdot \alpha
+$$
+
 where:
 - $\text{ITD}_{\max} = 0.70\text{ ms}$ (`HRTF_MAX_ITD_S`, reference cranial diameter).
 - $\theta_{\text{lat}} = \arcsin(|s|)$ represents the lateral incident angle, eliminating the $\sim 0.12\text{ ms}$ over-estimate of sinusoidal models at intermediate angles ($30^\circ\text{--}60^\circ$).
@@ -64,14 +71,21 @@ where:
 Head shadow models frequency-dependent diffraction around the cranial sphere:
 - **Low-Frequency Cranial Diffraction**: Sounds below $500\text{ Hz}$ bend around the skull with modest loss (broadband contralateral shadow of $-4.0\text{ dB}$, $g_{\text{far}} = 0.6310$).
 - **Contralateral High-Frequency Shadow**: The pinna/air high-shelf cascade introduces an additional $-9.0\text{ dB}$ attenuation on the far ear (totaling $-13.0\text{ dB}$ HF shadow), accurately matching measured human HRIRs.
-- Ipsilateral and contralateral gains are normalised to maintain acoustic energy balance:
-  $$g_L = 1 - s(1 - g_{\text{far}}), \quad g_R = 1, \quad g_{\text{norm}} = \sqrt{\frac{g_L^2 + g_R^2}{2}}$$
+- **Energy-Balanced Normalisation**: Ipsilateral and contralateral gains are normalised to maintain acoustic energy balance:
+
+$$
+g_L = 1 - s(1 - g_{\text{far}}), \quad g_R = 1, \quad g_{\text{norm}} = \sqrt{\frac{g_L^2 + g_R^2}{2}}
+$$
 
 ### 4. Anthropometric Pinna Spectral Cues
 Five cascading biquad filters in transposed direct-form II dynamically shape frequency content based on orientation and scale factor $\alpha$:
-- **Presence Resonance Peak**: Centred at $f = 3900\text{ Hz} / \alpha$, boosting up to $+9\text{ dB}$ for frontal sources to provide clarity and front-image definition.
+- **Presence Resonance Peak**: Centred at $f = 3900\text{ Hz} / \alpha$, boosting up to $+6\text{ dB}$ for frontal sources to provide clarity and front-image definition.
 - **Dynamic Concha Notch**: Median-plane elevation notch providing pinna attenuation shifting between $3.5\text{ kHz}$ (below, $v=-1$) and $9.5\text{ kHz}$ (overhead, $v=+1$), scaled by $\alpha$:
-  $$f_{\text{notch}} = \frac{6500 + 3000 v}{\alpha}$$
+
+$$
+f_{\text{notch}} = \frac{6500 + 3000 v}{\alpha}
+$$
+
 - **High-Frequency Air Shelf**: Cutoff at $8500\text{ Hz} / \alpha$, progressively attenuating rearward and overhead sources.
 - **Lateral Pinna Asymmetry**: Peaking filter at $2200\text{ Hz} / \alpha$, differentiating lateral positions from standard intensity panning.
 - **Near-Field Low-Frequency ILD Divergence (DVF)**: Low-shelf filter at $350\text{ Hz} / \alpha$ delivering up to $9.5\text{ dB}$ of low-frequency ILD divergence ($\pm 4.75\text{ dB}$ near/far ear shelving) for sources within $1\text{ metre}$.
@@ -87,7 +101,7 @@ A circular buffer models early reflections from five boundary surfaces:
 Reflections exhibit acoustic ILD at the ears and pass through a 1-pole high-frequency wall absorption filter ($35\%$ damping). Rather than scaling with direct inverse distance, room reflections scale with a diffuse room factor $\frac{1}{\sqrt{1 + 0.15 d}}$, establishing a realistic Direct-to-Reverberant Ratio (DRR) gradient that serves as the primary acoustic distance cue.
 
 ### 6. Master Headroom & Soft-Knee Saturation
-- **Headroom Scaling**: Direct signal scaled by $0.50$ ($-6.0\text{ dBFS}$), ensuring that $+6\text{ dB}$ pinna resonances on full-scale $0\text{ dBFS}$ inputs stay cleanly within linear headroom without driving the soft-limiter.
+- **Headroom Scaling**: Master headroom scaled by $0.24$ ($-12.4\text{ dBFS}$), ensuring that $+6\text{ dB}$ pinna resonances on full-scale $0\text{ dBFS}$ inputs stay cleanly within linear headroom without driving the soft-limiter.
 - **Near-Field Proximity Gain**: Gentle proximity boost below $1\text{ m}$ (up to $+3\text{ dB}$ at $5\text{ cm}$) providing natural auditory intimacy.
 - **Tanh Soft-Knee Saturation**: Transparent soft knee engaging above $-1.0\text{ dBFS}$ ($0.89125$), guaranteeing peak output strictly never exceeds $0\text{ dBFS}$.
 
@@ -206,6 +220,8 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 - **Factory & Controller**: Validates COM class creation, parameter registration ($7$ parameters), and normalisation curves.
 - **Latency Reporting**: Verifies processor declares $2$ samples of latency (`getLatencySamples() == 2`) for PDC.
 - **State Serialisation**: Verifies `getState()` and `setState()` full round-trip across all 7 parameters.
+- **Hostile Stream Immutability**: Verifies rejection of truncated or invalid processor and controller state streams while asserting parameter and state immutability.
+- **Mid-Session Rate Change & Rate-Specific ITD**: Validates mid-session sample rate changes up to $96\text{ kHz}$ with rate-specific ITD arrival index verification ($142 \pm 3$ samples at $96\text{ kHz}$, distinguishing from $48\text{ kHz}$).
 - **Binaural Energy & ILD**: Verifies that lateral panning ($90^\circ$) produces over $1.5\times$ more energy in the ipsilateral ear than the contralateral ear.
 - **Sample-Accurate Automation**: Verifies that parameter change events are applied at their exact sample offsets within the block.
 - **Oversize Block Handling**: Confirms that blocks larger than `maxSamplesPerBlock` ($1024+$ samples) process correctly and produce valid audio.
@@ -220,6 +236,9 @@ Every build executes comprehensive automated test binaries that thoroughly exerc
 - **Latency Extension**: Verifies plugin declares $2$ samples of latency via `CLAP_EXT_LATENCY`.
 - **Parameter Validation & Enumeration**: Tests parameter enumeration ($7$ parameters) and string conversions (validates exact `value_to_text` and `text_to_value` round-trip across all parameters).
 - **State Serialisation Round-Trip**: Verifies that saving state to a stream and restoring it accurately preserves all 7 parameter values across sessions.
+- **Hostile Stream Immutability & Rescan**: Rejects corrupted and truncated state streams (bad magic, invalid version 99, 6-byte truncated version, 3-byte truncated header, 24-byte payload) while asserting parameter immutability and host `rescan(CLAP_PARAM_RESCAN_VALUES)` notification.
+- **Limiter Transparency & Active Overdrive**: Frequency sweep and cold-start verification asserting peak $< 0.89125$ ($5.5\%$ linear margin under $-1.0\text{ dBFS}$ knee with limiter idle), plus active $+6\text{ dBFS}$ overdrive verification asserting peak $> 0.89125$ and $\le 1.000000$ (falsifying limiter bypass).
+- **Multi-Rate Sample Rates**: Exhaustive verification across $44.1\text{ kHz}$, $48\text{ kHz}$, $88.2\text{ kHz}$, $96\text{ kHz}$, $176.4\text{ kHz}$, $192\text{ kHz}$, and $384\text{ kHz}$ asserting buffer safety, filter stability, Woodworth ITD arrival scaling (e.g. sample $561 \pm 3$ at $384\text{ kHz}$), and bit-identical median symmetry.
 - **Woodworth Spherical Ray-Tracing ITD**: Asserts that intermediate lateral angle ($30^\circ$) arrival delay matches Woodworth spherical ray-tracing ($13\text{--}15$ samples, expected $\approx 13.4$) distinguishing from naive sine law ($16.8$ samples).
 - **Un-Aliased Near-Field ITD**: Asserts that extreme near-field delay ($5\text{ cm}$, $130\%$ ear scale) arrives at sample $60\text{--}70$ without circular buffer wrapping.
 - **Deterministic Spectral Differentiation**: Dogfoods internal test pulse to verify that crisp transient clicks exhibit $> 2\times$ the spectral first-difference energy of low rumble pulses.
