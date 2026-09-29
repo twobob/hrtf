@@ -26,6 +26,10 @@ public:
     Steinberg::tresult PLUGIN_API process (Steinberg::Vst::ProcessData& data) SMTG_OVERRIDE;
     Steinberg::uint32 PLUGIN_API getLatencySamples () SMTG_OVERRIDE { return 2; }
 
+    /* The Test Pulse generator produces sound from silent input, so a host
+       must never suspend processing when the input goes quiet. */
+    Steinberg::uint32 PLUGIN_API getTailSamples () SMTG_OVERRIDE { return Steinberg::Vst::kInfiniteTail; }
+
     Steinberg::tresult PLUGIN_API setState (Steinberg::IBStream* state) SMTG_OVERRIDE;
     Steinberg::tresult PLUGIN_API getState (Steinberg::IBStream* state) SMTG_OVERRIDE;
 
@@ -35,9 +39,13 @@ public:
 
 private:
     void applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value);
+    void applyFinalParameterValues (Steinberg::Vst::IParameterChanges* changes);
+    void syncCore ();
+    std::atomic<Steinberg::Vst::ParamValue>* stateSlot (Steinberg::int32 index);
 
     HrtfCore* mCore = nullptr;
-    std::atomic<Steinberg::Vst::ParamValue> mDistanceNorm { 0.09774436 }; // (2.0 - 0.05) / 19.95 = ~0.097744
+    std::atomic<Steinberg::Vst::ParamValue> mDistanceNorm { hrtf_position_from_distance (2.0) }; // 2 m on the log taper
+    std::atomic<Steinberg::Vst::ParamValue> mReflectionsNorm { 1.0 }; // 1 = room reflections on
     std::atomic<Steinberg::Vst::ParamValue> mRotationNorm { 0.0 };
     std::atomic<Steinberg::Vst::ParamValue> mElevationNorm { 0.5 }; // (0.0 - (-90.0)) / 180.0 = 0.5 (0 deg)
     std::atomic<Steinberg::Vst::ParamValue> mSpaceNorm { 0.15 };     // 15% room externalisation

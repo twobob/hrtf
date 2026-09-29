@@ -6,24 +6,67 @@
 
 namespace RotatingHrtf {
 
+namespace {
+
+/* Distance in metres on a logarithmic taper, so every doubling of distance
+   takes the same knob travel (5 cm to 1 m is half of it). The mapping is
+   shared with the processor and the CLAP build through hrtf_core.h. */
+class DistanceParameter : public Steinberg::Vst::RangeParameter
+{
+public:
+    DistanceParameter (const Steinberg::Vst::TChar* title, Steinberg::Vst::ParamID tag,
+                       const Steinberg::Vst::TChar* units, Steinberg::Vst::ParamValue defaultPlain,
+                       Steinberg::int32 flags)
+    : RangeParameter (title, tag, units, HRTF_DISTANCE_MIN_M, HRTF_DISTANCE_MAX_M, defaultPlain, 0, flags)
+    {
+        // The base constructor normalised the default linearly (virtual
+        // dispatch does not reach this class during construction).
+        info.defaultNormalizedValue = valueNormalized = toNormalized (defaultPlain);
+        setPrecision (2);
+    }
+
+    Steinberg::Vst::ParamValue toPlain (Steinberg::Vst::ParamValue normalised) const SMTG_OVERRIDE
+    {
+        return hrtf_distance_from_position (normalised);
+    }
+
+    Steinberg::Vst::ParamValue toNormalized (Steinberg::Vst::ParamValue plain) const SMTG_OVERRIDE
+    {
+        return hrtf_position_from_distance (plain);
+    }
+};
+
+Steinberg::Vst::StringListParameter* makeSwitch (const Steinberg::Vst::TChar* title,
+                                                 Steinberg::Vst::ParamID tag, bool defaultOn)
+{
+    auto* param = new Steinberg::Vst::StringListParameter (
+        title, tag, nullptr,
+        Steinberg::Vst::ParameterInfo::kCanAutomate | Steinberg::Vst::ParameterInfo::kIsList);
+    param->appendString (STR16 ("Off"));
+    param->appendString (STR16 ("On"));
+    param->getInfo ().defaultNormalizedValue = defaultOn ? 1.0 : 0.0;
+    param->setNormalized (defaultOn ? 1.0 : 0.0);
+    return param;
+}
+
+} // namespace
+
 Steinberg::tresult PLUGIN_API PlugController::initialize (Steinberg::FUnknown* context)
 {
     Steinberg::tresult result = EditController::initialize (context);
     if (result != Steinberg::kResultTrue)
         return Steinberg::kResultFalse;
 
-    // Distance parameter: 0.05 m to 20.0 m, default 2.0 m
-    auto* distParam = new Steinberg::Vst::RangeParameter (
-        STR16 ("Distance"), kParamDistance, STR16 ("m"),
-        0.05, 20.0, 2.0, 0,
-        Steinberg::Vst::ParameterInfo::kCanAutomate);
-    parameters.addParameter (distParam);
+    // Distance parameter: 0.05 m to 20.0 m (logarithmic), default 2.0 m
+    parameters.addParameter (new DistanceParameter (
+        STR16 ("Distance"), kParamDistance, STR16 ("m"), 2.0,
+        Steinberg::Vst::ParameterInfo::kCanAutomate));
 
-    // Rotation parameter: 0.0 deg to 360.0 deg, default 0.0 deg
+    // Rotation parameter: 0.0 deg to 360.0 deg, default 0.0 deg, wraps round
     auto* rotParam = new Steinberg::Vst::RangeParameter (
         STR16 ("Rotation"), kParamRotation, STR16 ("deg"),
         0.0, 360.0, 0.0, 0,
-        Steinberg::Vst::ParameterInfo::kCanAutomate);
+        Steinberg::Vst::ParameterInfo::kCanAutomate | Steinberg::Vst::ParameterInfo::kIsWrapAround);
     parameters.addParameter (rotParam);
 
     // Elevation parameter: -90.0 deg to 90.0 deg, default 0.0 deg
@@ -40,12 +83,8 @@ Steinberg::tresult PLUGIN_API PlugController::initialize (Steinberg::FUnknown* c
         Steinberg::Vst::ParameterInfo::kCanAutomate);
     parameters.addParameter (spaceParam);
 
-    // Test Pulse parameter: Off (0) / On (1), default Off (tick box in Ableton Live)
-    auto* pulseParam = new Steinberg::Vst::RangeParameter (
-        STR16 ("Test Pulse"), kParamTestPulse, STR16 (""),
-        0.0, 1.0, 0.0, 1,
-        Steinberg::Vst::ParameterInfo::kCanAutomate);
-    parameters.addParameter (pulseParam);
+    // Test Pulse parameter: Off / On, default Off (tick box in Ableton Live)
+    parameters.addParameter (makeSwitch (STR16 ("Test Pulse"), kParamTestPulse, false));
 
     // Test Tone parameter: 0.0 % to 100.0 %, default 50.0 % (0 = low rumble, 50 = pink noise, 100 = crisp transient)
     auto* toneParam = new Steinberg::Vst::RangeParameter (
@@ -61,6 +100,9 @@ Steinberg::tresult PLUGIN_API PlugController::initialize (Steinberg::FUnknown* c
         Steinberg::Vst::ParameterInfo::kCanAutomate);
     parameters.addParameter (earParam);
 
+    // Reflections parameter: room reflections On / Off (bypass), default On
+    parameters.addParameter (makeSwitch (STR16 ("Reflections"), kParamReflections, true));
+
     return Steinberg::kResultTrue;
 }
 
@@ -73,30 +115,19 @@ Steinberg::tresult PLUGIN_API PlugController::setComponentState (Steinberg::IBSt
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
     if (version != kStateVersion) return Steinberg::kResultFalse;
 
-    double dNorm = 0.0, rNorm = 0.0, eNorm = 0.0, sNorm = 0.0;
-    double pNorm = 0.0, tNorm = 0.0, esNorm = 0.0;
-    if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
+    // Read the whole payload before touching anything, so a truncated
+    // stream leaves every parameter as it was.
+    double norm[kParamCount] = {};
+    for (Steinberg::int32 i = 0; i < kParamCount; ++i)
+    {
+        if (!streamer.readDouble (norm[i])) return Steinberg::kResultFalse;
+    }
 
-    if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
-        setParamNormalized (kParamDistance, dNorm);
-    if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
-        setParamNormalized (kParamRotation, rNorm);
-    if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
-        setParamNormalized (kParamElevation, eNorm);
-    if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
-        setParamNormalized (kParamSpace, sNorm);
-    if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
-        setParamNormalized (kParamTestPulse, pNorm);
-    if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
-        setParamNormalized (kParamTestTone, tNorm);
-    if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
-        setParamNormalized (kParamEarScale, esNorm);
+    for (Steinberg::int32 i = 0; i < kParamCount; ++i)
+    {
+        if (std::isfinite (norm[i]) && norm[i] >= 0.0 && norm[i] <= 1.0)
+            setParamNormalized (kParamDistance + i, norm[i]);
+    }
 
     if (componentHandler)
         componentHandler->restartComponent (Steinberg::Vst::kParamValuesChanged);

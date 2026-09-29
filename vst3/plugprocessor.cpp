@@ -29,6 +29,11 @@ namespace RotatingHrtf {
 PlugProcessor::PlugProcessor ()
 {
     setControllerClass (kControllerUID);
+
+    /* AudioEffect advertises IProcessContextRequirements, and hosts that honour
+       it only fill in what is requested. The tempo-synchronised test pulse
+       needs the tempo, the musical position and the play state. */
+    processContextRequirements.needTempo ().needProjectTimeMusic ().needTransportState ();
 }
 
 PlugProcessor::~PlugProcessor ()
@@ -100,13 +105,7 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setActive (Steinberg::TBool state)
         mCore = hrtf_create (processSetup.sampleRate);
         if (mCore)
         {
-            double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
-            double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
-            hrtf_set_distance (mCore, dist_m);
-            hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
-            hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
-            hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
-            hrtf_set_ear_scale (mCore, ear_scale);
+            syncCore ();
             hrtf_reset (mCore);
         }
     }
@@ -146,6 +145,18 @@ static void copyMono (const Steinberg::Vst::AudioBusBuffers& inBus, float* mono,
     }
 }
 
+/* Push every DSP parameter from the atomics into the core. */
+void PlugProcessor::syncCore ()
+{
+    if (!mCore) return;
+    hrtf_set_distance (mCore, hrtf_distance_from_position (mDistanceNorm.load (std::memory_order_relaxed)));
+    hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
+    hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
+    hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
+    hrtf_set_ear_scale (mCore, 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60);
+    hrtf_set_reflections (mCore, mReflectionsNorm.load (std::memory_order_relaxed) >= 0.5);
+}
+
 void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::ParamValue value)
 {
     /* A non-finite or out-of-range value must never be cached or saved. */
@@ -153,44 +164,59 @@ void PlugProcessor::applyParameter (Steinberg::Vst::ParamID id, Steinberg::Vst::
     if (value < 0.0) value = 0.0;
     if (value > 1.0) value = 1.0;
 
-    if (id == kParamDistance)
+    switch (id)
     {
-        mDistanceNorm.store (value, std::memory_order_relaxed);
-        if (mCore)
-            hrtf_set_distance (mCore, 0.05 + value * (20.0 - 0.05));
+        case kParamDistance: mDistanceNorm.store (value, std::memory_order_relaxed); break;
+        case kParamRotation: mRotationNorm.store (value, std::memory_order_relaxed); break;
+        case kParamElevation: mElevationNorm.store (value, std::memory_order_relaxed); break;
+        case kParamSpace: mSpaceNorm.store (value, std::memory_order_relaxed); break;
+        case kParamTestPulse: mTestPulseNorm.store (value, std::memory_order_relaxed); break;
+        case kParamTestTone:
+            mTestToneNorm.store (value, std::memory_order_relaxed);
+            hrtf_test_gen_set_tone (&mTestGen, value);
+            break;
+        case kParamEarScale: mEarScaleNorm.store (value, std::memory_order_relaxed); break;
+        case kParamReflections: mReflectionsNorm.store (value, std::memory_order_relaxed); break;
+        default: return;
     }
-    else if (id == kParamRotation)
+    syncCore ();
+}
+
+/* Apply only the last point of each queue. Used whenever a block cannot be
+   rendered, so the host's parameter changes are still honoured. */
+void PlugProcessor::applyFinalParameterValues (Steinberg::Vst::IParameterChanges* changes)
+{
+    if (!changes) return;
+    const Steinberg::int32 numQueues = changes->getParameterCount ();
+    for (Steinberg::int32 i = 0; i < numQueues; ++i)
     {
-        mRotationNorm.store (value, std::memory_order_relaxed);
-        if (mCore)
-            hrtf_set_rotation_phase (mCore, value);
+        Steinberg::Vst::IParamValueQueue* queue = changes->getParameterData (i);
+        if (!queue) continue;
+        const Steinberg::int32 points = queue->getPointCount ();
+        if (points <= 0) continue;
+
+        Steinberg::int32 offset = 0;
+        Steinberg::Vst::ParamValue value = 0.0;
+        if (queue->getPoint (points - 1, offset, value) == Steinberg::kResultTrue)
+            applyParameter (queue->getParameterId (), value);
     }
-    else if (id == kParamElevation)
+}
+
+/* Zero every valid output channel of every output bus for [0, numSamples). */
+static void clearOutputs (Steinberg::Vst::ProcessData& data)
+{
+    if (data.numSamples <= 0 || !data.outputs) return;
+    for (Steinberg::int32 b = 0; b < data.numOutputs; ++b)
     {
-        mElevationNorm.store (value, std::memory_order_relaxed);
-        if (mCore)
-            hrtf_set_elevation_deg (mCore, -90.0 + value * 180.0);
-    }
-    else if (id == kParamSpace)
-    {
-        mSpaceNorm.store (value, std::memory_order_relaxed);
-        if (mCore)
-            hrtf_set_space (mCore, value);
-    }
-    else if (id == kParamTestPulse)
-    {
-        mTestPulseNorm.store (value, std::memory_order_relaxed);
-    }
-    else if (id == kParamTestTone)
-    {
-        mTestToneNorm.store (value, std::memory_order_relaxed);
-        hrtf_test_gen_set_tone (&mTestGen, value);
-    }
-    else if (id == kParamEarScale)
-    {
-        mEarScaleNorm.store (value, std::memory_order_relaxed);
-        if (mCore)
-            hrtf_set_ear_scale (mCore, 0.70 + value * 0.60);
+        Steinberg::Vst::AudioBusBuffers& bus = data.outputs[b];
+        if (!bus.channelBuffers32) continue;
+        for (Steinberg::int32 c = 0; c < bus.numChannels; ++c)
+        {
+            if (bus.channelBuffers32[c])
+                std::fill (bus.channelBuffers32[c], bus.channelBuffers32[c] + data.numSamples, 0.0f);
+        }
+        bus.silenceFlags = bus.numChannels >= 64 ? ~(Steinberg::uint64)0
+                                                 : (((Steinberg::uint64)1 << bus.numChannels) - 1);
     }
 }
 
@@ -215,53 +241,40 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
             queues[i] = data.inputParameterChanges->getParameterData (i);
     }
 
-    if (data.numSamples <= 0 || !mCore)
+    /* Every path that cannot render still honours the block's parameter
+       changes (a host flushes final values with numSamples == 0) and leaves
+       any output it was handed silent rather than holding stale samples. */
+    if (data.numSamples <= 0 || !mCore || data.numOutputs < 1 || !data.outputs ||
+        mMonoBuffer.empty () /* setupProcessing was never called */)
     {
-        /* No audio to render, but a host flushes the final value this way. */
-        for (Steinberg::int32 i = 0; i < numQueues; ++i)
-        {
-            if (!queues[i]) continue;
-            const Steinberg::int32 points = queues[i]->getPointCount ();
-            if (points <= 0) continue;
-
-            Steinberg::int32 offset = 0;
-            Steinberg::Vst::ParamValue value = 0.0;
-            if (queues[i]->getPoint (points - 1, offset, value) == Steinberg::kResultTrue)
-                applyParameter (queues[i]->getParameterId (), value);
-        }
+        applyFinalParameterValues (data.inputParameterChanges);
+        clearOutputs (data);
         return Steinberg::kResultOk;
     }
 
-    if (data.numInputs < 1 || data.numOutputs < 1)
-        return Steinberg::kResultOk;
-
-    Steinberg::Vst::AudioBusBuffers& inBus = data.inputs[0];
+    /* No input bus renders as silence in, which the Test Pulse still fills. */
+    static const Steinberg::Vst::AudioBusBuffers kNoInput = {};
+    const Steinberg::Vst::AudioBusBuffers& inBus =
+        (data.numInputs >= 1 && data.inputs) ? data.inputs[0] : kNoInput;
     Steinberg::Vst::AudioBusBuffers& outBus = data.outputs[0];
 
     /* A host may supply null buffers for an inactive bus, so the pointers
        are validated as well as the channel counts. */
     if (outBus.numChannels < 2 || !outBus.channelBuffers32 ||
         !outBus.channelBuffers32[0] || !outBus.channelBuffers32[1])
+    {
+        applyFinalParameterValues (data.inputParameterChanges);
+        clearOutputs (data);
         return Steinberg::kResultOk;
+    }
 
     const Steinberg::uint32 numSamples = (Steinberg::uint32)data.numSamples;
     const size_t capacity = mMonoBuffer.size ();
-    if (capacity == 0)
-        return Steinberg::kResultOk; /* setupProcessing was never called */
 
     float* mono = mMonoBuffer.data ();
 
-    if (mCore)
-    {
-        double dist_m = 0.05 + mDistanceNorm.load (std::memory_order_relaxed) * (20.0 - 0.05);
-        double ear_scale = 0.70 + mEarScaleNorm.load (std::memory_order_relaxed) * 0.60;
-        hrtf_set_distance (mCore, dist_m);
-        hrtf_set_rotation_phase (mCore, mRotationNorm.load (std::memory_order_relaxed));
-        hrtf_set_elevation_deg (mCore, -90.0 + mElevationNorm.load (std::memory_order_relaxed) * 180.0);
-        hrtf_set_space (mCore, mSpaceNorm.load (std::memory_order_relaxed));
-        hrtf_set_ear_scale (mCore, ear_scale);
-        hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm.load (std::memory_order_relaxed));
-    }
+    syncCore ();
+    hrtf_test_gen_set_tone (&mTestGen, mTestToneNorm.load (std::memory_order_relaxed));
 
     Steinberg::int32 cursor = 0;
     while (cursor < (Steinberg::int32)numSamples)
@@ -311,7 +324,12 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
             if (next <= cursor) break; /* no forward progress: stop rather than spin */
 
             const Steinberg::int32 sliceFrames = next - cursor;
-            if (mTestPulseNorm.load (std::memory_order_relaxed) >= 0.5)
+            copyMono (inBus, mono, cursor, sliceFrames);
+
+            /* The Test Pulse replaces the input, crossfading whenever it is
+               switched so neither edge clicks. */
+            const int pulseOn = mTestPulseNorm.load (std::memory_order_relaxed) >= 0.5;
+            if (pulseOn || mTestGen.mix > 0.0)
             {
                 double bpm = 120.0;
                 double beatPos = 0.0;
@@ -338,11 +356,8 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
                 {
                     sliceBeat += (double)cursor * (bpm / (60.0 * processSetup.sampleRate));
                 }
-                hrtf_test_gen_process (&mTestGen, mono, (size_t)sliceFrames, bpm, sliceBeat, isPlaying);
-            }
-            else
-            {
-                copyMono (inBus, mono, cursor, sliceFrames);
+                hrtf_test_gen_render (&mTestGen, mono, mono, (size_t)sliceFrames, bpm, sliceBeat,
+                                      isPlaying, pulseOn);
             }
 
             float* outSeg[2] = { outBus.channelBuffers32[0] + cursor,
@@ -359,6 +374,16 @@ Steinberg::tresult PLUGIN_API PlugProcessor::process (Steinberg::Vst::ProcessDat
     return Steinberg::kResultOk;
 }
 
+/* The atomics in state order (ParamIDs order). */
+std::atomic<Steinberg::Vst::ParamValue>* PlugProcessor::stateSlot (Steinberg::int32 index)
+{
+    std::atomic<Steinberg::Vst::ParamValue>* slots[kParamCount] = {
+        &mDistanceNorm, &mRotationNorm, &mElevationNorm, &mSpaceNorm,
+        &mTestPulseNorm, &mTestToneNorm, &mEarScaleNorm, &mReflectionsNorm
+    };
+    return (index >= 0 && index < kParamCount) ? slots[index] : nullptr;
+}
+
 Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* state)
 {
     if (!state) return Steinberg::kResultFalse;
@@ -368,32 +393,21 @@ Steinberg::tresult PLUGIN_API PlugProcessor::setState (Steinberg::IBStream* stat
     if (!streamer.readInt32 (version)) return Steinberg::kResultFalse;
     if (version != kStateVersion) return Steinberg::kResultFalse;
 
-    double dNorm = 0.0, rNorm = 0.0, eNorm = 0.0, sNorm = 0.0;
-    double pNorm = 0.0, tNorm = 0.0, esNorm = 0.0;
-    if (!streamer.readDouble (dNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (rNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (eNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (sNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (pNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (tNorm)) return Steinberg::kResultFalse;
-    if (!streamer.readDouble (esNorm)) return Steinberg::kResultFalse;
+    // Read the whole payload before touching anything, so a truncated
+    // stream leaves every parameter as it was.
+    double norm[kParamCount] = {};
+    for (Steinberg::int32 i = 0; i < kParamCount; ++i)
+    {
+        if (!streamer.readDouble (norm[i])) return Steinberg::kResultFalse;
+    }
 
     /* Out-of-range or non-finite values are ignored rather than pushed into
        the core, where they would poison the DSP state for the session. */
-    if (std::isfinite (dNorm) && dNorm >= 0.0 && dNorm <= 1.0)
-        mDistanceNorm.store (dNorm, std::memory_order_relaxed);
-    if (std::isfinite (rNorm) && rNorm >= 0.0 && rNorm <= 1.0)
-        mRotationNorm.store (rNorm, std::memory_order_relaxed);
-    if (std::isfinite (eNorm) && eNorm >= 0.0 && eNorm <= 1.0)
-        mElevationNorm.store (eNorm, std::memory_order_relaxed);
-    if (std::isfinite (sNorm) && sNorm >= 0.0 && sNorm <= 1.0)
-        mSpaceNorm.store (sNorm, std::memory_order_relaxed);
-    if (std::isfinite (pNorm) && pNorm >= 0.0 && pNorm <= 1.0)
-        mTestPulseNorm.store (pNorm, std::memory_order_relaxed);
-    if (std::isfinite (tNorm) && tNorm >= 0.0 && tNorm <= 1.0)
-        mTestToneNorm.store (tNorm, std::memory_order_relaxed);
-    if (std::isfinite (esNorm) && esNorm >= 0.0 && esNorm <= 1.0)
-        mEarScaleNorm.store (esNorm, std::memory_order_relaxed);
+    for (Steinberg::int32 i = 0; i < kParamCount; ++i)
+    {
+        if (std::isfinite (norm[i]) && norm[i] >= 0.0 && norm[i] <= 1.0)
+            stateSlot (i)->store (norm[i], std::memory_order_relaxed);
+    }
 
     return Steinberg::kResultOk;
 }
@@ -404,13 +418,8 @@ Steinberg::tresult PLUGIN_API PlugProcessor::getState (Steinberg::IBStream* stat
     Steinberg::IBStreamer streamer (state);
 
     streamer.writeInt32 (kStateVersion);
-    streamer.writeDouble (mDistanceNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mRotationNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mElevationNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mSpaceNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mTestPulseNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mTestToneNorm.load (std::memory_order_relaxed));
-    streamer.writeDouble (mEarScaleNorm.load (std::memory_order_relaxed));
+    for (Steinberg::int32 i = 0; i < kParamCount; ++i)
+        streamer.writeDouble (stateSlot (i)->load (std::memory_order_relaxed));
 
     return Steinberg::kResultOk;
 }
